@@ -10,6 +10,7 @@ loguru = "*"
 discord = "*"
 ad3a795 = {editable = true,path = "./../warcraftlogs"}
 warcraftlogs = {editable = true,path = "./../warcraftlogs"}
+prettyprinter = "*"
 
 [requires]
 python_version = "3.6"
