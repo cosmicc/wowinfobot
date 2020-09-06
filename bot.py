@@ -1,19 +1,21 @@
 import discord
 from discord.ext import commands
 from configparser import ConfigParser
-from warcraftlogs.client import WarcraftLogsClient
 from loguru import logger as log
 import datetime
 from math import trunc
+from getapi import WCLClient, TSMClient
 
 configfile = '/etc/wowinfobot.cfg'
 configdata = ConfigParser()
 configdata.read(configfile)
-wclapi = configdata.get("general", "warcraftlogs_apikey")
-discordkey = configdata.get("general", "discord_apikey")
-server = configdata.get("general", "server_name").capitalize()
-region = configdata.get("general", "server_region").upper()
-guild = configdata.get("general", "guild_name").capitalize()
+wcl_api = configdata.get("warcraftlogs", "api_key")
+discordkey = configdata.get("discord", "api_key")
+server = configdata.get("warcraft", "server_name").capitalize()
+region = configdata.get("warcraft", "server_region").upper()
+guild = configdata.get("warcraft", "guild_name").capitalize()
+tsm_url = configdata.get("tsm", "api_url")
+wcl_url = configdata.get("warcraftlogs", "api_url")
 
 SUCCESS_COLOR = 0x00FF00
 FAIL_COLOR = 0xFF0000
@@ -44,7 +46,8 @@ command_prefix = "?"
 client = commands.Bot(command_prefix=command_prefix, case_insensitive=True)
 client.remove_command("help")
 
-wclclient = WarcraftLogsClient(wclapi)
+wclclient = WCLClient(wcl_url, wcl_api)
+tsmclient = TSMClient(tsm_url)
 
 
 def tfixup(dtime):
@@ -188,9 +191,7 @@ async def on_ready():
         log.log("SUCCESS", f"Discord logged in as {client.user.name} id {client.user.id}")
         activity = discord.Game(name="Type ?help")
         try:
-            await client.change_presence(
-                status=discord.Status.online, activity=activity
-            )
+            await client.change_presence(status=discord.Status.online, activity=activity)
         except:
             log.error("Exiting")
 
@@ -226,12 +227,8 @@ async def messagesend(ctx, embed, allowgeneral=False, reject=True, adminonly=Fal
     try:
         if type(ctx.message.channel) == discord.channel.DMChannel:
             return await ctx.message.author.send(embed=embed)
-        elif str(ctx.message.channel) != "bot-channel" or (
-            not allowgeneral and str(ctx.message.channel) == "general"
-        ):
-            role = str(
-                discord.utils.get(ctx.message.author.roles, name="admin")
-            )
+        #elif str(ctx.message.channel) != "bot-channel" or (not allowgeneral and str(ctx.message.channel) == "general"):
+        #    role = str(discord.utils.get(ctx.message.author.roles, name="admin"))
             #if role != "admin":
             #    await ctx.message.delete()
             #if reject and role != "admin":
@@ -240,13 +237,13 @@ async def messagesend(ctx, embed, allowgeneral=False, reject=True, adminonly=Fal
             #elif role != "admin":
             #    return await ctx.message.author.send(embed=embed)
             #else:
-            return await ctx.message.channel.send(embed=embed)
+        #    return await ctx.message.channel.send(embed=embed)
         else:
             return await ctx.message.channel.send(embed=embed)
     except:
         log.exception("Critical error in message send")
 
-
+'''
 @client.event
 async def on_command_error(ctx, error):
     try:
@@ -266,13 +263,13 @@ async def on_command_error(ctx, error):
     except:
         log.exception("command error: ")
 
-
+'''
 @client.command(name="last", aliases=["lastraid", "lastraids", "raids"])
 @commands.check(logcommand)
 async def lastraids(ctx, *args):
     embed = discord.Embed(description="**Please wait, fetching information...**", color=INFO_COLOR)
     respo = await messagesend(ctx, embed, allowgeneral=True, reject=False)
-    enclist = wclclient.guild(guild, server, region)
+    enclist = wclguild(guild, server, region)
     a = 1
     b = ''
     nzone = 0

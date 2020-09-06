@@ -8,9 +8,8 @@ verify_ssl = true
 [packages]
 loguru = "*"
 discord = "*"
-ad3a795 = {editable = true,path = "./../warcraftlogs"}
-warcraftlogs = {editable = true,path = "./../warcraftlogs"}
 prettyprinter = "*"
+requests = "*"
 
 [requires]
 python_version = "3.6"
