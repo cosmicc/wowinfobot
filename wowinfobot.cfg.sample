@@ -1,0 +1,20 @@
+[general]
+loglevel = INFO 
+logfile = /home/user/wowinfobot.log
+
+[warcraftlogs]
+api_url = https://classic.warcraftlogs.com/v1/
+api_key = change me
+
+[discord]
+command_prefix = ?
+api_key = change me
+
+[warcraft]
+server_name = Bigglesworth
+server_region = US
+guild_name = Consortium
+faction = Alliance
+
+[tsm]
+api_url = https://api.nexushub.co/wow-classic/v1/
