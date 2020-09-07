@@ -1,0 +1,16 @@
+[Unit]
+Description= WoWInfo Discord Bot Daemon Service
+Requires=
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=1
+User=user
+WorkingDirectory=/home/user/wowinfobot
+ExecStart=/usr/local/bin/pipenv run python /home/user/wowinfobot/bot.py
+
+[Install]
+WantedBy=multi-user.target

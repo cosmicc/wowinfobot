@@ -1,18 +1,52 @@
+#!/usr/bin/env python3.8
 import signal
-import sys
+import traceback
 from configparser import ConfigParser
 from datetime import datetime, timedelta
 from math import trunc
 # from prettyprinter import pprint
 from numbers import Number
+from os import _exit
+from sys import exit
 
 import discord
 from discord.ext import commands
 from loguru import logger as log
 
 from apifetch import NexusAPI, WarcraftLogsAPI
+from processlock import PLock
 
 configfile = '/etc/wowinfobot.cfg'
+signals = (0, 'SIGHUP', 'SIGINT', 'SIGQUIT', 4, 5, 6, 7, 8, 'SIGKILL', 10, 11, 12, 13, 14, 'SIGTERM')
+
+'''
+def async_exception_handler(loop, context):
+    exception = context.get('exception')
+    message = context.get('message')
+    log.warning(f'Async exception caught!')
+    try:
+        raise exception
+    except:
+        log.exception(message)
+'''
+
+
+def signal_handler(signal, frame):
+    log.warning(f'Termination signal [{signals[signal]}] Closing web sessions.')
+    wclclient.close()
+    tsmclient.close()
+    log.info(f'Exiting.')
+    exit(0)
+
+
+signal.signal(signal.SIGTERM, signal_handler)  # Graceful Shutdown
+signal.signal(signal.SIGHUP, signal_handler)  # Reload/Restart
+signal.signal(signal.SIGINT, signal_handler)  # Hard Exit
+signal.signal(signal.SIGQUIT, signal_handler)  # Hard Exit
+
+processlock = PLock()
+processlock.lock()
+
 configdata = ConfigParser()
 configdata.read(configfile)
 wcl_api = configdata.get("warcraftlogs", "api_key")
@@ -335,23 +369,30 @@ async def messagesend(ctx, embed, allowgeneral=False, reject=True, adminonly=Fal
     try:
         if type(ctx.message.channel) == discord.channel.DMChannel:
             return await ctx.message.author.send(embed=embed)
-        #elif str(ctx.message.channel) != "bot-channel" or (not allowgeneral and str(ctx.message.channel) == "general"):
+        # elif str(ctx.message.channel) != "bot-channel" or (not allowgeneral and str(ctx.message.channel) == "general"):
         #    role = str(discord.utils.get(ctx.message.author.roles, name="admin"))
-            #if role != "admin":
+            # if role != "admin":
             #    await ctx.message.delete()
-            #if reject and role != "admin":
+            # if reject and role != "admin":
             #    rejectembed = discord.Embed(description=rejectmsg, color=HELP_COLOR)
             #    return await ctx.message.author.send(embed=rejectembed)
-            #elif role != "admin":
+            # elif role != "admin":
             #    return await ctx.message.author.send(embed=embed)
-            #else:
+            # else:
         #    return await ctx.message.channel.send(embed=embed)
         else:
             return await ctx.message.channel.send(embed=embed)
     except:
         log.exception("Critical error in message send")
 
-'''
+
+@client.event
+async def on_error(event, *args, **kwargs):
+    message = args[0]
+    log.error(traceback.format_exc())
+    await client.send_message(message.channel, "error")
+
+
 @client.event
 async def on_command_error(ctx, error):
     try:
@@ -363,15 +404,13 @@ async def on_command_error(ctx, error):
         elif isinstance(error, commands.CheckFailure):
             log.warning(f"discord check failed: {error}")
             embed = discord.Embed(description="**An error has occurred, contact Arbin.**", color=FAIL_COLOR)
-            #await messagesend(ctx, embed, allowgeneral=True, reject=False)
+            # await messagesend(ctx, embed, allowgeneral=True, reject=False)
         else:
             log.exception(f"discord bot error for {ctx.message.author}: {ctx.message.content} - {error}")
             embed = discord.Embed(description="**An error has occurred, contact Arbin.**", color=FAIL_COLOR)
-            #await messagesend(ctx, embed, allowgeneral=True, reject=False)
+            # await messagesend(ctx, embed, allowgeneral=True, reject=False)
     except:
         log.exception("command error: ")
-
-'''
 
 
 @client.command(name="last", aliases=["lastraid", "lastraids", "raids"])
@@ -381,7 +420,6 @@ async def lastraids(ctx, *args):
     respo = await messagesend(ctx, embed, allowgeneral=True, reject=False)
     enclist = await wclclient.guild(guild, server, region)
     a = 1
-    b = ''
     nzone = 0
     tt = 0
     if args:
@@ -424,7 +462,7 @@ async def lastraids(ctx, *args):
             embed.add_field(name=f"{RZONE[each['zone']]} - {convert_time(each['start'], dateonly=True)} ({each['title']})", value=f"{convert_time (each['start'], timeonly=True)}-{convert_time(each['end'], timeonly=True)} - {elapsedTime(tfixup(each['start']), tfixup(each['end']))}\n[Bosses Killed: ({kills}\{BZONE[each['zone']]}) with {wipes} Wipes - Last Boss: {lastboss}](https://classic.warcraftlogs.com/reports/{each['id']})", inline=False)
             a = a + 1
     if a == 1:
-        b = 'No information was found'
+        embed = discord.Embed(description=f"No raids were found for {guild.title()} on {server.capitalize()}", color=FAIL_COLOR)
     await respo.delete()
     await messagesend(ctx, embed, allowgeneral=True, reject=False)
 
@@ -452,14 +490,14 @@ async def info(ctx, *args):
         await player.fetch()
         if player.exists:
             embed = discord.Embed(title=f'{args[0].capitalize()} on {region}-{server}', color=INFO_COLOR)
-            #embed.set_author(name=args[0].capitalize())
+            # embed.set_author(name=args[0].capitalize())
             embed.add_field(name=f"Class:", value=f"{player.playerclass}")
             embed.add_field(name=f"Spec:", value=f"{player.playerspec}")
             embed.add_field(name=f"Role:", value=f"{player.playerrole}")
-            #embed.add_field(name=f"Gear Enchants:", value=f"{}")
-            #embed.add_field(name=f"Avg Item Level for fight:", value=f"{")
-            #embed.add_field(name=f"Last Fight Percentile:", value=f"{truncate_float(perc, 1)}%")
-            #embed.add_field(name=f"Last Fight Rank:", value="{:,} of {:,}".format(rank, outof))
+            # embed.add_field(name=f"Gear Enchants:", value=f"{}")
+            # embed.add_field(name=f"Avg Item Level for fight:", value=f"{")
+            # embed.add_field(name=f"Last Fight Percentile:", value=f"{truncate_float(perc, 1)}%")
+            # embed.add_field(name=f"Last Fight Rank:", value="{:,} of {:,}".format(rank, outof))
             embed.add_field(name=f"Encounters Logged:", value=f"{player.totalencounters}")
             embed.add_field(name=f"MC Bosses Logged:", value=f"{player.mccount}")
             embed.add_field(name=f"Ony Raids Logged:", value=f"{player.onycount}")
@@ -493,7 +531,8 @@ async def gear(ctx, *args):
         embed = discord.Embed(description="Please wait, fetching information...", color=INFO_COLOR)
         respo = await messagesend(ctx, embed, allowgeneral=True, reject=False)
         player = Player(args[0])
-        pres = await player.fetch()
+        await player.fetch()
+        # Addfail check like items #####################
         if player.exists:
             embed = discord.Embed(title=f"{args[0].capitalize()}'s gear from {player.geardate}", color=INFO_COLOR)
             for item in player.gearlist:
@@ -621,4 +660,21 @@ async def help(ctx):
     if (type(ctx.message.channel) != discord.channel.DMChannel and str(ctx.message.channel) != "bot-channel"):
         await ctx.message.delete()
 
-client.run(discordkey)
+
+def main():
+    client.run(discordkey)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except KeyboardInterrupt:
+        log.warning(f'Termination signal [KeyboardInterrupt] Closing web sessions.')
+        wclclient.close()
+        tsmclient.close()
+        log.info(f'Exiting.')
+        exit(0)
+        try:
+            exit(0)
+        except SystemExit:
+            _exit(0)

@@ -12,6 +12,10 @@ class WarcraftLogsAPI:
         self.api_key = api_key
         self.session = aiohttp.ClientSession()
 
+    def close(self):
+        if self.session is not None:
+            return self.session.close()
+
     async def _get(self, path, **kwargs):
         params = {"api_key": self.api_key}
         params.update(kwargs)
@@ -56,6 +60,10 @@ class NexusAPI:
     def __init__(self, url):
         self.url = url
         self.session = aiohttp.ClientSession()
+
+    def close(self):
+        if self.session is not None:
+            return self.session.close()
 
     async def _get(self, path, **kwargs):
         params = kwargs
