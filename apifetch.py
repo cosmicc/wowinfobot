@@ -11,6 +11,7 @@ class WarcraftLogsAPI:
         self.url = url
         self.api_key = api_key
         self.session = aiohttp.ClientSession()
+        log.debug('WarcraftlLogsAPI web session started')
 
     def close(self):
         if self.session is not None:
@@ -20,18 +21,18 @@ class WarcraftLogsAPI:
         params = {"api_key": self.api_key}
         params.update(kwargs)
         url = parse.urljoin(self.url, path)
-        log.debug(f'WarLogsAPI Retreiving URL: {url}')
+        log.debug(f'WarcraftLogsAPI Retreiving URL: {url}')
         try:
             async with self.session.get(url, params=params, timeout=5) as response:
-                log.debug(f'WarLogsAPI HTTP Response: {response.status}')
+                log.debug(f'WarcraftLogsAPI HTTP Response: {response.status}')
                 if response.status == 200:
-                    log.debug(f'WarLogsAPI Returning JSON response')
+                    log.debug(f'WarcraftLogsAPI Returning JSON response')
                     return await response.json()
                 else:
-                    log.error(f'WarLogsAPI RETRIEVE ERROR! {url}')
+                    log.error(f'WarcraftLogsAPI RETRIEVE ERROR! {url}')
                     return False
         except asyncio.exceptions.TimeoutError:
-            log.error(f'WarLogsAPI Timeout Error!')
+            log.error(f'WarcraftLogsAPI Timeout Error!')
             return False
 
     async def guild(self, name, server, region, **params):
@@ -60,6 +61,7 @@ class NexusAPI:
     def __init__(self, url):
         self.url = url
         self.session = aiohttp.ClientSession()
+        log.debug('NexusAPI web session started')
 
     def close(self):
         if self.session is not None:

@@ -6,7 +6,7 @@ from datetime import datetime
 from math import trunc
 # from prettyprinter import pprint
 from numbers import Number
-from os import _exit
+from os import _exit, path, stat
 from sys import exit
 
 import discord
@@ -37,8 +37,24 @@ signal.signal(signal.SIGQUIT, signal_handler)  # Hard Exit
 processlock = PLock()
 processlock.lock()
 
+if not path.exists(configfile) or stat(configfile).st_size == 0:
+    log.error(f"Config file: {configfile} doesn't exist or is empty. Exiting.")
+    exit(1)
+
 configdata = ConfigParser()
 configdata.read(configfile)
+
+configtemplate = {'general': ['loglevel', 'logfile'], 'server': ['server_name', 'server_region', 'server_timezone', 'guild_name', 'faction'], 'discord': ['command_prefix', 'api_key'], 'warcraftlogs_api': ['api_url', 'api_key'], 'blizzard_api': ['api_url', 'client_id', 'client_secret'], 'tsm_api': ['api_url', 'fuzzy_search_threshold']}
+
+for section, options in configtemplate.items():
+    if not configdata.has_section(section):
+        log.error(f'Error: Missing configuration section {section} in config file: {configfile}. Exiting.')
+        exit(1)
+    else:
+        for option in options:
+            if not configdata.has_option(section, option):
+                log.error(f'Error: Missing config option {option} in {section} in config file: {configfile}. Exiting.')
+                exit(1)
 
 logfile = configdata.get("general", "logfile")
 loglevel = configdata.get("general", "loglevel")
@@ -55,14 +71,22 @@ bliz_secret = configdata.get("blizzard_api", "client_secret")
 wcl_api = configdata.get("warcraftlogs_api", "api_key")
 wcl_url = configdata.get("warcraftlogs_api", "api_url")
 tsm_url = configdata.get("tsm_api", "api_url")
+search_threshold = configdata.get("tsm_api", "fuzzy_search_threshold")
 
-log.add(sink=str(logfile), level=loglevel, buffering=1, enqueue=True, backtrace=True, diagnose=True, serialize=False, delay=False, rotation="5 MB", retention="1 month", compression="tar.gz")
+log.debug(f'Configuration loaded successfully from {configfile}')
+
+log.add(sink=str(logfile), level=loglevel, buffering=1, enqueue=True, backtrace=True, diagnose=True, serialize=False, delay=False, rotation="5       MB", retention="1 month", compression="tar.gz")
+
+log.debug(f'Logfile started: {logfile}')
 
 client = commands.Bot(command_prefix=command_prefix, case_insensitive=True)
 client.remove_command("help")
+log.debug('Discord class initalized')
 
 wclclient = WarcraftLogsAPI(wcl_url, wcl_api)
+log.debug('WarcraftLogsAPI class initalized')
 tsmclient = NexusAPI(tsm_url)
+log.debug('NexusAPI class initalized')
 
 SUCCESS_COLOR = 0x00FF00
 FAIL_COLOR = 0xFF0000
@@ -575,7 +599,7 @@ async def item(ctx, *args):
         respo = await messagesend(ctx, embed, allowgeneral=True, reject=False)
         if not isinstance(args[0], Number):
             argstring = ' '.join(args)
-            itemdata = await tsmclient.search(query=argstring, limit=1)
+            itemdata = await tsmclient.search(query=argstring, limit=1, threshold=search_threshold)
             if len(itemdata) != 0:
                 itemid = itemdata[0]['itemId']
             else:
@@ -646,6 +670,35 @@ async def item(ctx, *args):
         embed = discord.Embed(description=msg, color=FAIL_COLOR)
         await respo.delete()
         await messagesend(ctx, embed, allowgeneral=False, reject=True)
+
+
+@client.command(name="setting", aliases=["set", "settings"])
+@commands.check(logcommand)
+async def setting(ctx, *args):
+    if args:
+        # Add settings logic ############
+        # configdata.set('bug_tracker', 'password', 'secret')
+        if not path.exists(configfile) or stat(configfile).st_size == 0:
+            with open(configfile, 'w') as cf:
+                configdata.write(cf)
+            log.info(f'New config written to file: {configfile}')
+        else:
+            log.error(f"Error writing config to: {configfile} File doesn't exist or is empty")
+            # Add embed response to config save error ############
+    else:
+        pass  # Add response to missing args  ############
+    msg = "Commands can be privately messaged directly to the bot or in channels"
+    embed = discord.Embed(title="WoW Info Classic Bot Commands:", description=msg, color=HELP_COLOR)
+    embed.add_field(name=f"**`{command_prefix}raids [optional instance name]`**", value=f"Last 5 raids for the guild, [MC,ONY,BWL,ZG,AQ20,AQ40]\nLeave instance name blank for all", inline=False)
+    embed.add_field(name=f"**`{command_prefix}info <character name>`**", value=f"Character information from last logged encounters", inline=False)
+    embed.add_field(name=f"**`{command_prefix}gear <character name>`**", value=f"Character gear from last logged encounters", inline=False)
+    embed.add_field(name=f"**`{command_prefix}price <item name>`**", value=f"Price and information for an item", inline=False)
+    embed.add_field(name=f"**`{command_prefix}item <item name>`**", value=f"Same as ?price", inline=False)
+    embed.add_field(name=f"**`{command_prefix}news`**", value=f"Latest World of Warcraft Classic News", inline=False)
+    await ctx.message.author.send(embed=embed)
+    if (type(ctx.message.channel) != discord.channel.DMChannel and str(ctx.message.channel) != "bot-channel"):
+        await ctx.message.delete()
+
 
 
 @client.command(name="help", aliases=["helpme", "commands"])

@@ -24,3 +24,4 @@ client_secret = <Change Me>
 
 [tsm_api]
 api_url = https://api.nexushub.co/wow-classic/v1/
+fuzzy_search_threshold = 0.8
