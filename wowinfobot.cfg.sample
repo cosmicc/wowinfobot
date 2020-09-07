@@ -1,20 +1,26 @@
 [general]
-loglevel = INFO 
+loglevel = INFO
 logfile = /home/user/wowinfobot.log
 
-[warcraftlogs]
-api_url = https://classic.warcraftlogs.com/v1/
-api_key = change me
+[server]
+server_name = Bigglesworth
+server_region = US
+server_timezone = America/Los_Angeles
+guild_name = <Change Me>
+faction = <Change Me>
 
 [discord]
 command_prefix = ?
-api_key = change me
+api_key = <Change Me>
 
-[warcraft]
-server_name = Bigglesworth
-server_region = US
-guild_name = Consortium
-faction = Alliance
+[warcraftlogs_api]
+api_url = https://classic.warcraftlogs.com/v1/
+api_key = <Change Me>
 
-[tsm]
+[blizzard_api]
+api_url = https://us.api.blizzard.com/
+client_id = <Change Me>
+client_secret = <Change Me>
+
+[tsm_api]
 api_url = https://api.nexushub.co/wow-classic/v1/

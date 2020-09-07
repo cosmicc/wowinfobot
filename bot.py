@@ -2,7 +2,7 @@
 import signal
 import traceback
 from configparser import ConfigParser
-from datetime import datetime, timedelta
+from datetime import datetime
 from math import trunc
 # from prettyprinter import pprint
 from numbers import Number
@@ -12,6 +12,7 @@ from sys import exit
 import discord
 from discord.ext import commands
 from loguru import logger as log
+from pytz import timezone
 
 from apifetch import NexusAPI, WarcraftLogsAPI
 from processlock import PLock
@@ -19,20 +20,9 @@ from processlock import PLock
 configfile = '/etc/wowinfobot.cfg'
 signals = (0, 'SIGHUP', 'SIGINT', 'SIGQUIT', 4, 5, 6, 7, 8, 'SIGKILL', 10, 11, 12, 13, 14, 'SIGTERM')
 
-'''
-def async_exception_handler(loop, context):
-    exception = context.get('exception')
-    message = context.get('message')
-    log.warning(f'Async exception caught!')
-    try:
-        raise exception
-    except:
-        log.exception(message)
-'''
-
 
 def signal_handler(signal, frame):
-    log.warning(f'Termination signal [{signals[signal]}] Closing web sessions.')
+    log.warning(f'Termination signal [{signals[signal]}] caught. Closing web sessions...')
     wclclient.close()
     tsmclient.close()
     log.info(f'Exiting.')
@@ -49,17 +39,22 @@ processlock.lock()
 
 configdata = ConfigParser()
 configdata.read(configfile)
-wcl_api = configdata.get("warcraftlogs", "api_key")
-command_prefix = configdata.get("discord", "command_prefix")
-discordkey = configdata.get("discord", "api_key")
-server = configdata.get("warcraft", "server_name").capitalize()
-region = configdata.get("warcraft", "server_region").upper()
-guild = configdata.get("warcraft", "guild_name").capitalize()
-faction = configdata.get("warcraft", "faction").capitalize()
-tsm_url = configdata.get("tsm", "api_url")
-wcl_url = configdata.get("warcraftlogs", "api_url")
+
 logfile = configdata.get("general", "logfile")
 loglevel = configdata.get("general", "loglevel")
+server = configdata.get("server", "server_name").capitalize()
+region = configdata.get("server", "server_region").upper()
+servertimezone = configdata.get("server", "server_timezone")
+guild = configdata.get("server", "guild_name").capitalize()
+faction = configdata.get("server", "faction").capitalize()
+command_prefix = configdata.get("discord", "command_prefix")
+discordkey = configdata.get("discord", "api_key")
+bliz_url = configdata.get("blizzard_api", "api_url")
+bliz_id = configdata.get("blizzard_api", "client_id")
+bliz_secret = configdata.get("blizzard_api", "client_secret")
+wcl_api = configdata.get("warcraftlogs_api", "api_key")
+wcl_url = configdata.get("warcraftlogs_api", "api_url")
+tsm_url = configdata.get("tsm_api", "api_url")
 
 log.add(sink=str(logfile), level=loglevel, buffering=1, enqueue=True, backtrace=True, diagnose=True, serialize=False, delay=False, rotation="5 MB", retention="1 month", compression="tar.gz")
 
@@ -84,6 +79,7 @@ RZONE = {1005: "Ahn'Qiraj 40", 1002: "Blackwing Lair", 1004: "Ahn'Qiraj 20", 100
 BOSSREF = {'Onyxia': 1001, 'Ragnaros': 1000, 'Lucifron': 1000, 'Magmadar': 1000, 'Gehennas': 1000, 'Garr': 1000, 'Baron Geddon': 1000, 'Shazzrah': 1000, 'Sulfuron Harbinger': 1000, 'Golemagg the Incinerator': 1000, 'Majordomo Executus': 1000, 'Ossirian the Unscarred': 1004, 'Ayamiss the Hunter': 1004, 'Buru the Gorger': 1004, 'Moam': 1004, 'General Rajaxx': 1004, 'Kurinnaxx': 1004, 'Nefarian': 1002, 'Chromaggus': 1000, "Jin'do the Hexxer": 1003, 'High Priest Thekal': 1003, "C'Thun": 1005, 'Ouro': 1005, 'Hakkar': 1003, 'Flamegor': 1002, 'Ebonroc': 1002, 'Princess Huhuran': 1005, 'The Prophet Skeram': 1005, 'Firemaw': 1002, 'Broodlord Lashlayer': 1002, 'Vaelastrasz the Corrupt': 1002}
 
 BZONE = {1001: 1, 1003: 9, 1000: 10, 1004: 6, 1002: 8, 1005: 9}
+
 intervals = (
     ("years", 31536000),
     ("months", 2592000),
@@ -95,28 +91,35 @@ intervals = (
 )
 
 
-def tfixup(dtime):
-    tm = int(str(dtime)[:10])
-    return tm - 28800
+def epochtz(epoch):
+    fixedepoch = int(str(epoch)[:10])
+    date_obj = datetime.fromtimestamp(fixedepoch)
+    date_obj = timezone('UTC').localize(date_obj)
+    date_obj = date_obj.astimezone(timezone(servertimezone))
+    tzepoch = date_obj.timestamp()
+    return (int(tzepoch))
 
 
 def convert_time(dtime, timeonly=False, dateonly=False):
     if timeonly:
-        return datetime.fromtimestamp(tfixup(dtime)).strftime('%-I:%M%p')
+        return datetime.fromtimestamp(epochtz(dtime)).strftime('%-I:%M%p')
     elif dateonly:
-        return datetime.fromtimestamp(tfixup(dtime)).strftime('%m/%d/%y')
+        return datetime.fromtimestamp(epochtz(dtime)).strftime('%m/%d/%y')
     else:
-        return datetime.fromtimestamp(tfixup(dtime)).strftime('%m/%d/%y %-I:%M%p')
+        return datetime.fromtimestamp(epochtz(dtime)).strftime('%m/%d/%y %-I:%M%p')
 
 
 def fix_item_time(rawtime):
     date_obj = datetime.strptime(rawtime, '%Y-%m-%dT%H:%M:%S.000Z')
-    date_adj = date_obj - timedelta(hours=8)
-    return date_adj.strftime('%m-%d-%y %I:%M %p')
+    date_obj = timezone('UTC').localize(date_obj)
+    date_obj = date_obj.astimezone(timezone(servertimezone))
+    return date_obj.strftime('%m-%d-%y %I:%M %p')
 
 
 def fix_news_time(rawtime):
     date_obj = datetime.strptime(rawtime, '%a, %d %b %Y %H:%M:%S -0500')
+    date_obj = timezone('America/New_York').localize(date_obj)
+    date_obj = date_obj.astimezone(timezone(servertimezone))
     return date_obj.strftime('%A, %b %d, %Y')
 
 
@@ -238,15 +241,15 @@ class Player:
 
     async def filter_last_encounters(self, npl):
         for entry in npl:
-            if tfixup(entry['startTime']) > min(self.edl):
+            if epochtz(entry['startTime']) > min(self.edl):
                 if entry['reportID'] in self.tpl:
                     del self.edl[self.tpl[entry["reportID"]]]
                     del self.tpl[entry["reportID"]]
-                    self.edl.update({tfixup(entry["startTime"]): entry})
-                    self.tpl.update({entry["reportID"]: tfixup(entry["startTime"])})
+                    self.edl.update({epochtz(entry["startTime"]): entry})
+                    self.tpl.update({entry["reportID"]: epochtz(entry["startTime"])})
                 else:
-                    self.edl.update({tfixup(entry["startTime"]): entry})
-                    self.tpl.update({entry["reportID"]: tfixup(entry["startTime"])})
+                    self.edl.update({epochtz(entry["startTime"]): entry})
+                    self.tpl.update({entry["reportID"]: epochtz(entry["startTime"])})
                     if len(self.edl) > 5:
                         del self.edl[min(self.edl)]
 
@@ -459,7 +462,7 @@ async def lastraids(ctx, *args):
     for each in enclist:
         if (each['zone'] == nzone or nzone == 0) and (a <= 5):
             kills, wipes, size, lastboss = await fight_data(each['id'])
-            embed.add_field(name=f"{RZONE[each['zone']]} - {convert_time(each['start'], dateonly=True)} ({each['title']})", value=f"{convert_time (each['start'], timeonly=True)}-{convert_time(each['end'], timeonly=True)} - {elapsedTime(tfixup(each['start']), tfixup(each['end']))}\n[Bosses Killed: ({kills}\{BZONE[each['zone']]}) with {wipes} Wipes - Last Boss: {lastboss}](https://classic.warcraftlogs.com/reports/{each['id']})", inline=False)
+            embed.add_field(name=f"{RZONE[each['zone']]} - {convert_time(each['start'], dateonly=True)} ({each['title']})", value=f"{convert_time (each['start'], timeonly=True)}-{convert_time(each['end'], timeonly=True)} - {elapsedTime(epochtz(each['start']), epochtz(each['end']))}\n[Bosses Killed: ({kills}\{BZONE[each['zone']]}) with {wipes} Wipes - Last Boss: {lastboss}](https://classic.warcraftlogs.com/reports/{each['id']})", inline=False)
             a = a + 1
     if a == 1:
         embed = discord.Embed(description=f"No raids were found for {guild.title()} on {server.capitalize()}", color=FAIL_COLOR)
@@ -669,7 +672,7 @@ if __name__ == '__main__':
     try:
         main()
     except KeyboardInterrupt:
-        log.warning(f'Termination signal [KeyboardInterrupt] Closing web sessions.')
+        log.info(f'Termination signal [KeyboardInterrupt] Closing web sessions.')
         wclclient.close()
         tsmclient.close()
         log.info(f'Exiting.')
@@ -678,3 +681,5 @@ if __name__ == '__main__':
             exit(0)
         except SystemExit:
             _exit(0)
+    except:
+        log.critical(f'Main Exception Caught!')
