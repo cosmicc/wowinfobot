@@ -1,21 +1,39 @@
+import signal
+import sys
+from configparser import ConfigParser
+from datetime import datetime, timedelta
+from math import trunc
+# from prettyprinter import pprint
+from numbers import Number
+
 import discord
 from discord.ext import commands
-from configparser import ConfigParser
 from loguru import logger as log
-import datetime
-from math import trunc
-from getapi import WCLClient, TSMClient
+
+from apifetch import NexusAPI, WarcraftLogsAPI
 
 configfile = '/etc/wowinfobot.cfg'
 configdata = ConfigParser()
 configdata.read(configfile)
 wcl_api = configdata.get("warcraftlogs", "api_key")
+command_prefix = configdata.get("discord", "command_prefix")
 discordkey = configdata.get("discord", "api_key")
 server = configdata.get("warcraft", "server_name").capitalize()
 region = configdata.get("warcraft", "server_region").upper()
 guild = configdata.get("warcraft", "guild_name").capitalize()
+faction = configdata.get("warcraft", "faction").capitalize()
 tsm_url = configdata.get("tsm", "api_url")
 wcl_url = configdata.get("warcraftlogs", "api_url")
+logfile = configdata.get("general", "logfile")
+loglevel = configdata.get("general", "loglevel")
+
+log.add(sink=str(logfile), level=loglevel, buffering=1, enqueue=True, backtrace=True, diagnose=True, serialize=False, delay=False, rotation="5 MB", retention="1 month", compression="tar.gz")
+
+client = commands.Bot(command_prefix=command_prefix, case_insensitive=True)
+client.remove_command("help")
+
+wclclient = WarcraftLogsAPI(wcl_url, wcl_api)
+tsmclient = NexusAPI(tsm_url)
 
 SUCCESS_COLOR = 0x00FF00
 FAIL_COLOR = 0xFF0000
@@ -42,26 +60,30 @@ intervals = (
     ("seconds", 1),
 )
 
-command_prefix = "?"
-client = commands.Bot(command_prefix=command_prefix, case_insensitive=True)
-client.remove_command("help")
-
-wclclient = WCLClient(wcl_url, wcl_api)
-tsmclient = TSMClient(tsm_url)
-
 
 def tfixup(dtime):
     tm = int(str(dtime)[:10])
     return tm - 28800
 
 
-def converttime(dtime, timeonly=False, dateonly=False):
+def convert_time(dtime, timeonly=False, dateonly=False):
     if timeonly:
-        return datetime.datetime.fromtimestamp(tfixup(dtime)).strftime('%-I:%M%p')
+        return datetime.fromtimestamp(tfixup(dtime)).strftime('%-I:%M%p')
     elif dateonly:
-        return datetime.datetime.fromtimestamp(tfixup(dtime)).strftime('%m/%d/%y')
+        return datetime.fromtimestamp(tfixup(dtime)).strftime('%m/%d/%y')
     else:
-        return datetime.datetime.fromtimestamp(tfixup(dtime)).strftime('%m/%d/%y %-I:%M%p')
+        return datetime.fromtimestamp(tfixup(dtime)).strftime('%m/%d/%y %-I:%M%p')
+
+
+def fix_item_time(rawtime):
+    date_obj = datetime.strptime(rawtime, '%Y-%m-%dT%H:%M:%S.000Z')
+    date_adj = date_obj - timedelta(hours=8)
+    return date_adj.strftime('%m-%d-%y %I:%M %p')
+
+
+def fix_news_time(rawtime):
+    date_obj = datetime.strptime(rawtime, '%a, %d %b %Y %H:%M:%S -0500')
+    return date_obj.strftime('%A, %b %d, %Y')
 
 
 def truncate_float(number, digits):
@@ -95,9 +117,92 @@ def elapsedTime(start_time, stop_time, append=False):
         return ", ".join(result[:granularity])
 
 
+def convertprice(rawprice):
+    if rawprice is None:
+        return 'Not Available'
+    if rawprice == 'Not Available':
+        return 'Not Available'
+    if rawprice < 100:
+        return f'{rawprice}c'
+    elif rawprice >= 100 and rawprice < 10000:
+        silver = int(str(rawprice)[:-2])
+        copper = int(str(rawprice)[-2:])
+        return f'{silver}s {copper}c'
+    elif rawprice >= 10000:
+        silver = int(str(rawprice)[:-2])
+        silver = int(str(silver)[-2:])
+        copper = int(str(rawprice)[-2:])
+        gold = int(str(rawprice)[:-4])
+        return f'{gold}g {silver}s {copper}c'
+
+
+def filter_details(name, tags, labels):
+    details = []
+    for line in labels:
+        label = line['label']
+        if label != 'Sell Price:' and not label.startswith('Item Level') and not label.startswith('Requires Level') and label not in tags and label != name:
+            details.append(label)
+    return details
+
+
+class Item:
+
+    def __init__(self, itemid):
+        self.name = None
+        self.exists = False
+        self.id = itemid
+        self.icon = None
+        self.tags = []
+        self.requiredlevel = 'Not Available'
+        self.level = 'Not Available'
+        self.sellprice = 'Not Available'
+        self.vendorprice = 'Not Available'
+        self.lastupdate = 'Not Available'
+        self.current_marketvalue = 'Not Available'
+        self.current_historicalvalue = 'Not Available'
+        self.current_minbuyout = 'Not Available'
+        self.current_auctions = 'Not Available'
+        self.current_quantity = 'Not Available'
+        self.previous_marketvalue = 'Not Available'
+        self.previous_historicalvalue = 'Not Available'
+        self.previous_minbuyout = 'Not Available'
+        self.previous_auctions = 'Not Available'
+        self.previous_quantity = 'Not Available'
+        self.tooltip = []
+
+    async def fetch(self):
+        itemdata = await tsmclient.price(self.id, server.lower(), faction.lower())
+        if not itemdata:
+            return False
+        else:
+            self.exists = True
+            self.name = itemdata['name']
+            self.icon = itemdata['icon']
+            self.tags = itemdata['tags']
+            self.requiredlevel = itemdata['requiredLevel']
+            self.level = itemdata['itemLevel']
+            self.sellprice = itemdata['sellPrice']
+            self.vendorprice = itemdata['vendorPrice']
+            self.lastupdate = itemdata['stats']['lastUpdated']
+            if itemdata['stats']['current'] is not None:
+                self.current_marketvalue = itemdata['stats']['current']['marketValue']
+                self.current_historicalvalue = itemdata['stats']['current']['historicalValue']
+                self.current_minbuyout = itemdata['stats']['current']['minBuyout']
+                self.current_auctions = itemdata['stats']['current']['numAuctions']
+                self.current_quantity = itemdata['stats']['current']['quantity']
+            if itemdata['stats']['previous'] is not None:
+                self.previous_marketvalue = itemdata['stats']['previous']['marketValue']
+                self.previous_historicalvalue = itemdata['stats']['previous']['historicalValue']
+                self.previous_minbuyout = itemdata['stats']['previous']['minBuyout']
+                self.previous_auctions = itemdata['stats']['previous']['numAuctions']
+                self.previous_quantity = itemdata['stats']['previous']['quantity']
+                self.tooltip = itemdata['tooltip']
+            return True
+
+
 class Player:
 
-    def filter_last_encounters(self, npl):
+    async def filter_last_encounters(self, npl):
         for entry in npl:
             if tfixup(entry['startTime']) > min(self.edl):
                 if entry['reportID'] in self.tpl:
@@ -131,8 +236,10 @@ class Player:
         self.geardate = "0"
         self.edl = {0: 0}
         self.tpl = {0: 0}
+
+    async def fetch(self):
         for kkey, vval in RZONE.items():
-            parselist = wclclient.parses(self.playername, server, region, zone=kkey)
+            parselist = await wclclient.parses(self.playername, server, region, zone=kkey)
             if len(parselist) != 0 and 'error' not in parselist:
                 self.totalencounters = self.totalencounters + len(parselist)
                 if kkey == 1000:
@@ -147,43 +254,44 @@ class Player:
                     self.aq20count = self.aq20count + len(parselist)
                 elif kkey == 1005:
                     self.aq40count = self.aq40count + len(parselist)
-                self.filter_last_encounters(parselist)
+                await self.filter_last_encounters(parselist)
         if self.totalencounters > 0:
             self.exists = True
+            self.lastencounters = sorted(self.edl.items())
+            for encounter in self.lastencounters:
+                if encounter[1] != 0:
+                    if 'class' in encounter[1] and self.playerclass == "Not Available":
+                        self.playerclass = encounter[1]['class']
+                    if 'spec' in encounter[1] and self.playerspec == "Not Available":
+                        if encounter[1]['spec'] not in ROLES:
+                            self.playerspec = encounter[1]['spec']
+                        else:
+                            self.playerrole = encounter[1]['spec']
+                    reporttable = await wclclient.tables('casts', encounter[1]['reportID'], start=0, end=18000)
+                    for entry in reporttable['entries']:
+                        if entry['name'] == self.playername:
+                            if 'spec' in entry and self.playerspec == "Not Available":
+                                self.playerspec = entry['spec']
+                            if 'icon' in entry and self.playerspec == "Not Available" and len(entry['icon'].split('-')) == 2:
+                                self.playerclass = entry['icon'].split('-')[0]
+                                self.playerspec = entry['icon'].split('-')[1]
+                            if 'class' in entry and self.playerclass == "Not Available":
+                                self.playerclass = entry['class']
+                            if 'itemLevel' in entry and self.gearlevel == 0:
+                                self.gearlevel = entry['itemLevel']
+                            if 'gear' in entry:
+                                if len(entry['gear']) > 1:
+                                    zone = BOSSREF[encounter[1]['encounterName']]
+                                    if zone == 1005:
+                                        self.gearlist = entry['gear']
+                                        self.geardate = convert_time(encounter[1]['startTime'], dateonly=True)
+                                    elif len(self.gearlist) < 1:
+                                        self.gearlist = entry['gear']
+                                        self.geardate = convert_time(encounter[1]['startTime'], dateonly=True)
+            self.lastencounter = self.lastencounters[len(self.lastencounters) - 1][1]
+            return True
         else:
             return None
-        self.lastencounters = sorted(self.edl.items())
-        for encounter in self.lastencounters:
-            if encounter[1] != 0:
-                if 'class' in encounter[1] and self.playerclass == "Not Available":
-                    self.playerclass = encounter[1]['class']
-                if 'spec' in encounter[1] and self.playerspec == "Not Available":
-                    if encounter[1]['spec'] not in ROLES:
-                        self.playerspec = encounter[1]['spec']
-                    else:
-                        self.playerrole = encounter[1]['spec']
-                reporttable = wclclient.tables('casts', encounter[1]['reportID'], start=0, end=18000)
-                for entry in reporttable['entries']:
-                    if entry['name'] == self.playername:
-                        if 'spec' in entry and self.playerspec == "Not Available":
-                            self.playerspec = entry['spec']
-                        if 'icon' in entry and self.playerspec == "Not Available" and len(entry['icon'].split('-')) == 2:
-                            self.playerclass = entry['icon'].split('-')[0]
-                            self.playerspec = entry['icon'].split('-')[1]
-                        if 'class' in entry and self.playerclass == "Not Available":
-                            self.playerclass = entry['class']
-                        if 'itemLevel' in entry and self.gearlevel == 0:
-                            self.gearlevel = entry['itemLevel']
-                        if 'gear' in entry:
-                            if len(entry['gear']) > 1:
-                                zone = BOSSREF[encounter[1]['encounterName']]
-                                if zone == 1005:
-                                    self.gearlist = entry['gear']
-                                    self.geardate = converttime(encounter[1]['startTime'], dateonly=True)
-                                elif len(self.gearlist) < 1:
-                                    self.gearlist = entry['gear']
-                                    self.geardate = converttime(encounter[1]['startTime'], dateonly=True)
-        self.lastencounter = self.lastencounters[len(self.lastencounters) - 1][1]
 
 
 @client.event
@@ -196,8 +304,8 @@ async def on_ready():
             log.error("Exiting")
 
 
-def fight_data(fid):
-    a = wclclient.fights(fid)
+async def fight_data(fid):
+    a = await wclclient.fights(fid)
     kills = 0
     wipes = 0
     size = 0
@@ -264,12 +372,14 @@ async def on_command_error(ctx, error):
         log.exception("command error: ")
 
 '''
+
+
 @client.command(name="last", aliases=["lastraid", "lastraids", "raids"])
 @commands.check(logcommand)
 async def lastraids(ctx, *args):
     embed = discord.Embed(description="**Please wait, fetching information...**", color=INFO_COLOR)
     respo = await messagesend(ctx, embed, allowgeneral=True, reject=False)
-    enclist = wclguild(guild, server, region)
+    enclist = await wclclient.guild(guild, server, region)
     a = 1
     b = ''
     nzone = 0
@@ -310,11 +420,24 @@ async def lastraids(ctx, *args):
     embed = discord.Embed(title=tttitle, color=INFO_COLOR)
     for each in enclist:
         if (each['zone'] == nzone or nzone == 0) and (a <= 5):
-            kills, wipes, size, lastboss = fight_data(each['id'])
-            embed.add_field(name=f"{RZONE[each['zone']]} - {converttime(each['start'], dateonly=True)} ({each['title']})", value=f"{converttime(each['start'], timeonly=True)}-{converttime(each['end'], timeonly=True)} - {elapsedTime(tfixup(each['start']), tfixup(each['end']))}\n[Bosses Killed: ({kills}\{BZONE[each['zone']]}) with {wipes} Wipes - Last Boss: {lastboss}](https://classic.warcraftlogs.com/reports/{each['id']})", inline=False)
+            kills, wipes, size, lastboss = await fight_data(each['id'])
+            embed.add_field(name=f"{RZONE[each['zone']]} - {convert_time(each['start'], dateonly=True)} ({each['title']})", value=f"{convert_time (each['start'], timeonly=True)}-{convert_time(each['end'], timeonly=True)} - {elapsedTime(tfixup(each['start']), tfixup(each['end']))}\n[Bosses Killed: ({kills}\{BZONE[each['zone']]}) with {wipes} Wipes - Last Boss: {lastboss}](https://classic.warcraftlogs.com/reports/{each['id']})", inline=False)
             a = a + 1
     if a == 1:
         b = 'No information was found'
+    await respo.delete()
+    await messagesend(ctx, embed, allowgeneral=True, reject=False)
+
+
+@client.command(name="news", aliases=["wownews", "warcraftnews"])
+@commands.check(logcommand)
+async def news(ctx, *args):
+    embed = discord.Embed(description="Please wait, fetching information...", color=INFO_COLOR)
+    respo = await messagesend(ctx, embed, allowgeneral=True, reject=False)
+    news = await tsmclient.news()
+    embed = discord.Embed(title=f'World of Warcraft Classic News', color=INFO_COLOR)
+    for each in news:
+        embed.add_field(name=f"**{each['title']}**", value=f"{fix_news_time(each['pubDate'])}\n[{each['content']}]({each['link']})", inline=False)
     await respo.delete()
     await messagesend(ctx, embed, allowgeneral=True, reject=False)
 
@@ -323,9 +446,10 @@ async def lastraids(ctx, *args):
 @commands.check(logcommand)
 async def info(ctx, *args):
     if args:
-        embed = discord.Embed(description="**Please wait, fetching information...**", color=INFO_COLOR)
+        embed = discord.Embed(description="Please wait, fetching information...", color=INFO_COLOR)
         respo = await messagesend(ctx, embed, allowgeneral=True, reject=False)
         player = Player(args[0])
+        await player.fetch()
         if player.exists:
             embed = discord.Embed(title=f'{args[0].capitalize()} on {region}-{server}', color=INFO_COLOR)
             #embed.set_author(name=args[0].capitalize())
@@ -346,7 +470,7 @@ async def info(ctx, *args):
             elen = len(player.lastencounters) - 1
             msg = ""
             while elen >= 0:
-                msg = msg + f"{converttime(player.lastencounters[elen][1]['startTime'], dateonly=True)}  [{RZONE[BOSSREF[player.lastencounters[elen][1]['encounterName']]]}](https://classic.warcraftlogs.com/reports/{player.lastencounters[elen][1]['reportID']}) Last Boss: {player.lastencounters[elen][1]['encounterName']}\n"
+                msg = msg + f"{convert_time(player.lastencounters[elen][1]['startTime'], dateonly=True)}  [{RZONE[BOSSREF[player.lastencounters[elen][1]['encounterName']]]}](https://classic.warcraftlogs.com/reports/{player.lastencounters[elen][1]['reportID']}) Last Boss: {player.lastencounters[elen][1]['encounterName']}\n"
                 elen = elen - 1
             embed.add_field(name="Last 5 Raids Logged:", value=msg, inline=False)
             await respo.delete()
@@ -366,9 +490,10 @@ async def info(ctx, *args):
 @commands.check(logcommand)
 async def gear(ctx, *args):
     if args:
-        embed = discord.Embed(description="**Please wait, fetching information...**", color=INFO_COLOR)
+        embed = discord.Embed(description="Please wait, fetching information...", color=INFO_COLOR)
         respo = await messagesend(ctx, embed, allowgeneral=True, reject=False)
         player = Player(args[0])
+        pres = await player.fetch()
         if player.exists:
             embed = discord.Embed(title=f"{args[0].capitalize()}'s gear from {player.geardate}", color=INFO_COLOR)
             for item in player.gearlist:
@@ -400,18 +525,100 @@ async def gear(ctx, *args):
         await messagesend(ctx, embed, allowgeneral=False, reject=True)
 
 
+@client.command(name="item", aliases=["price", "itemprice"])
+@commands.check(logcommand)
+async def item(ctx, *args):
+    if args:
+        embed = discord.Embed(description="Please wait, fetching information...", color=INFO_COLOR)
+        respo = await messagesend(ctx, embed, allowgeneral=True, reject=False)
+        if not isinstance(args[0], Number):
+            argstring = ' '.join(args)
+            itemdata = await tsmclient.search(query=argstring, limit=1)
+            if len(itemdata) != 0:
+                itemid = itemdata[0]['itemId']
+            else:
+                msg = f"Cannot locate information for item: {argstring.title()}"
+                embed = discord.Embed(description=msg, color=FAIL_COLOR)
+                await respo.delete()
+                await messagesend(ctx, embed, allowgeneral=False, reject=True)
+                return None
+        else:
+            itemid = int(args[0])
+        item = Item(itemid)
+        ires = await item.fetch()
+        if item.exists:
+            if item.lastupdate is None:
+                dsg = 'Prices not available for this item'
+            else:
+                dsg = f'Prices from {faction.capitalize()} on {server.capitalize()} at {fix_item_time(item.lastupdate)}'
+            embed = discord.Embed(title="", description=dsg, color=INFO_COLOR)
+            embed.set_author(name=item.name, url=f"https://classic.wowhead.com/item={item.id}", icon_url=item.icon)
+            msg = ""
+            for tag in item.tags:
+                msg = msg + f"{tag}\n"
+            if msg == "":
+                msg = "None"
+            embed.add_field(name=f"Tags:", value=msg)
+            embed.add_field(name=f"Item Level:", value=f"{item.level} ")
+            embed.add_field(name=f"Required Level:", value=f"{item.requiredlevel} ")
+            embed.add_field(name=f"Sell Price:", value=f"{convertprice(item.sellprice)} ")
+            embed.add_field(name=f"Vendor Price:", value=f"{convertprice(item.vendorprice)} ")
+            if isinstance(item.current_auctions, Number):
+                ica = f'**{item.current_auctions:,d}**'
+            else:
+                ica = f'Not Available'
+            if isinstance(item.current_quantity, Number):
+                icb = f'**{item.current_quantity:,d}**'
+            else:
+                icb = f'Not Available'
+            embed.add_field(name=f"Current Auctions/Prices:", value=f"Auctions: **{ica}**\nQuantity Available: **{icb}**\nMarket Value: **{convertprice(item.current_marketvalue)}**\nHistorical Value: **{convertprice(item.current_historicalvalue)}**\nMinimum Buyout: **{convertprice(item.current_minbuyout)}**", inline=False)
+            if isinstance(item.previous_auctions, Number):
+                ica = f'**{item.previous_auctions:,d}**'
+            else:
+                ica = f'Not Available'
+            if isinstance(item.previous_quantity, Number):
+                icb = f'**{item.previous_quantity:,d}**'
+            else:
+                icb = f'Not Available'
+            embed.add_field(name=f"Previous Auctions/Prices:", value=f"Auctions: **{ica}**\nQuantity Available: **{icb}**\nMarket Value: **{convertprice(item.previous_marketvalue)}**\nHistorical Value: **{convertprice(item.previous_historicalvalue)}**\nMinimum Buyout: **{convertprice(item.previous_minbuyout)}**", inline=False)
+            msg = ""
+            for val in filter_details(item.name, item.tags, item.tooltip):
+                msg = msg + f"{val}\n"
+            if msg != "":
+                embed.add_field(name=f"{item.name.title()} Details:", value=msg)
+            await respo.delete()
+            await messagesend(ctx, embed, allowgeneral=False, reject=True)
+        else:
+            if ires is None:
+                msg = f"Cannot locate information for item: {item.name.title()}"
+                embed = discord.Embed(description=msg, color=FAIL_COLOR)
+                await respo.delete()
+                await messagesend(ctx, embed, allowgeneral=False, reject=True)
+            elif not ires:
+                msg = f"Error retreiving information, please try again later."
+                embed = discord.Embed(description=msg, color=FAIL_COLOR)
+                await respo.delete()
+                await messagesend(ctx, embed, allowgeneral=False, reject=True)
+    else:
+        msg = f"You must specify a item name or item id to get prices for"
+        embed = discord.Embed(description=msg, color=FAIL_COLOR)
+        await respo.delete()
+        await messagesend(ctx, embed, allowgeneral=False, reject=True)
+
+
 @client.command(name="help", aliases=["helpme", "commands"])
 @commands.check(logcommand)
 async def help(ctx):
     msg = "Commands can be privately messaged directly to the bot or in channels"
     embed = discord.Embed(title="WoW Info Classic Bot Commands:", description=msg, color=HELP_COLOR)
     embed.add_field(name=f"**`{command_prefix}raids [optional instance name]`**", value=f"Last 5 raids for the guild, [MC,ONY,BWL,ZG,AQ20,AQ40]\nLeave instance name blank for all", inline=False)
-    embed.add_field(name=f"**`{command_prefix}info [character name]`**", value=f"Character information from last encounters", inline=False)
-    embed.add_field(name=f"**`{command_prefix}gear [character name]`**", value=f"Worn gear from last encounters", inline=False)
-
+    embed.add_field(name=f"**`{command_prefix}info <character name>`**", value=f"Character information from last logged encounters", inline=False)
+    embed.add_field(name=f"**`{command_prefix}gear <character name>`**", value=f"Character gear from last logged encounters", inline=False)
+    embed.add_field(name=f"**`{command_prefix}price <item name>`**", value=f"Price and information for an item", inline=False)
+    embed.add_field(name=f"**`{command_prefix}item <item name>`**", value=f"Same as ?price", inline=False)
+    embed.add_field(name=f"**`{command_prefix}news`**", value=f"Latest World of Warcraft Classic News", inline=False)
     await ctx.message.author.send(embed=embed)
     if (type(ctx.message.channel) != discord.channel.DMChannel and str(ctx.message.channel) != "bot-channel"):
         await ctx.message.delete()
 
 client.run(discordkey)
-
