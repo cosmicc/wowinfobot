@@ -5,7 +5,6 @@ from pathlib import Path
 
 from loguru import logger as log
 
-
 rundir = Path("/run")
 tmpdir = Path("/tmp")
 

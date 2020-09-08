@@ -4,7 +4,6 @@ import traceback
 from configparser import ConfigParser
 from datetime import datetime
 from math import trunc
-# from prettyprinter import pprint
 from numbers import Number
 from os import _exit, path, stat
 from sys import exit
@@ -12,10 +11,12 @@ from sys import exit
 import discord
 from discord.ext import commands
 from loguru import logger as log
+from prettyprinter import pprint
 from pytz import timezone
 
 from apifetch import NexusAPI, WarcraftLogsAPI
 from processlock import PLock
+from guildconfigparser import GuildConfigParser, RedisPool
 
 configfile = '/etc/wowinfobot.cfg'
 signals = (0, 'SIGHUP', 'SIGINT', 'SIGQUIT', 4, 5, 6, 7, 8, 'SIGKILL', 10, 11, 12, 13, 14, 'SIGTERM')
@@ -58,6 +59,9 @@ for section, options in configtemplate.items():
 
 logfile = configdata.get("general", "logfile")
 loglevel = configdata.get("general", "loglevel")
+redis_host = configdata.get("general", "redis_host")
+redis_port = configdata.get("general", "redis_port")
+redis_db = configdata.get("general", "redis_db")
 server = configdata.get("server", "server_name").capitalize()
 region = configdata.get("server", "server_region").upper()
 servertimezone = configdata.get("server", "server_timezone")
@@ -73,19 +77,21 @@ wcl_url = configdata.get("warcraftlogs_api", "api_url")
 tsm_url = configdata.get("tsm_api", "api_url")
 search_threshold = configdata.get("tsm_api", "fuzzy_search_threshold")
 
-log.debug(f'Configuration loaded successfully from {configfile}')
+log.debug(f'System configuration loaded successfully from {configfile}')
 
 log.add(sink=str(logfile), level=loglevel, buffering=1, enqueue=True, backtrace=True, diagnose=True, serialize=False, delay=False, rotation="5       MB", retention="1 month", compression="tar.gz")
 
 log.debug(f'Logfile started: {logfile}')
 
-client = commands.Bot(command_prefix=command_prefix, case_insensitive=True)
-client.remove_command("help")
+bot = commands.Bot(command_prefix=command_prefix, case_insensitive=True)
+bot.remove_command("help")
 log.debug('Discord class initalized')
 
-wclclient = WarcraftLogsAPI(wcl_url, wcl_api)
+redis = RedisPool(redis_host, redis_port, redis_db)
+bot.loop.create_task(redis.connect())
+wclbot = WarcraftLogsAPI(wcl_url, wcl_api)
 log.debug('WarcraftLogsAPI class initalized')
-tsmclient = NexusAPI(tsm_url)
+tsmbot = NexusAPI(tsm_url)
 log.debug('NexusAPI class initalized')
 
 SUCCESS_COLOR = 0x00FF00
@@ -115,7 +121,7 @@ intervals = (
 )
 
 
-def epochtz(epoch):
+def epochtz(epoch, servertimezone):
     fixedepoch = int(str(epoch)[:10])
     date_obj = datetime.fromtimestamp(fixedepoch)
     date_obj = timezone('UTC').localize(date_obj)
@@ -133,14 +139,14 @@ def convert_time(dtime, timeonly=False, dateonly=False):
         return datetime.fromtimestamp(epochtz(dtime)).strftime('%m/%d/%y %-I:%M%p')
 
 
-def fix_item_time(rawtime):
+def fix_item_time(rawtime, servertimezone):
     date_obj = datetime.strptime(rawtime, '%Y-%m-%dT%H:%M:%S.000Z')
     date_obj = timezone('UTC').localize(date_obj)
     date_obj = date_obj.astimezone(timezone(servertimezone))
     return date_obj.strftime('%m-%d-%y %I:%M %p')
 
 
-def fix_news_time(rawtime):
+def fix_news_time(rawtime, servertimezone):
     date_obj = datetime.strptime(rawtime, '%a, %d %b %Y %H:%M:%S -0500')
     date_obj = timezone('America/New_York').localize(date_obj)
     date_obj = date_obj.astimezone(timezone(servertimezone))
@@ -197,6 +203,74 @@ def convertprice(rawprice):
         return f'{gold}g {silver}s {copper}c'
 
 
+async def user_info(ctx):
+    if type(ctx.message.channel) == discord.channel.DMChannel:
+        for guild in bot.guilds:
+            member = discord.utils.get(guild.members, id=ctx.author.id)
+            if member:
+                is_admin_role = False
+                is_user_role = False
+                guildconfig = GuildConfigParser(redis, guild.id)
+                await guildconfig.read()
+                admin_id = guildconfig.get("discord", "admin_role_id")
+                user_id = guildconfig.get("discord", "user_role_id")
+                for role in member.roles:
+                    if role.id == admin_id:
+                        is_admin_role = True
+                    if role.id == user_id:
+                        is_user_role = True
+                return {'user_id': ctx.author.id, 'user_name': ctx.author.name, 'guild_id': guild.id, 'channel': 'DMChannel', 'is_member': True, 'is_user_role': is_user_role, 'is_admin_role': is_admin_role}
+            else:
+                return {'user_id': ctx.author.id, 'user_name': ctx.author.name, 'guild_id': None, 'channel': 'DMChannel', 'is_member': False, 'is_user_role': False, 'is_admin_role': False}
+
+    else:
+        is_admin_role = False
+        is_user_role = False
+        guildconfig = GuildConfigParser(redis, ctx.author.guild.id)
+        await guildconfig.read()
+        admin_id = guildconfig.get("discord", "admin_role_id")
+        user_id = guildconfig.get("discord", "user_role_id")
+        member = discord.utils.get(ctx.author.guild.members, id=ctx.author.id)
+        for role in member.roles:
+            if role.id == admin_id:
+                is_admin_role = True
+            if role.id == user_id:
+                is_user_role = True
+        return {'user_id': ctx.author.id, 'user_name': ctx.author.name, 'guild_id': ctx.author.guild.id, 'channel': ctx.message.channel.id, 'is_member': True, 'is_user_role': is_user_role, 'is_admin_role': is_admin_role}
+
+
+async def is_admin(ctx):
+    admin = False
+    memcount = 0
+    if type(ctx.message.channel) == discord.channel.DMChannel:
+        for guild in bot.guilds:
+            if discord.utils.get(guild.members, id=ctx.author.id):
+                memcount = memcount + 1
+                pprint(guild.roles)
+                if discord.utils.get(guild.roles, id=644205730395586570):
+                    admin = True
+                # print(discord.utils.get(guild.members, id=ctx.author.id))
+
+            # the member is in the server, do something #
+            else:
+                # the member is not in the server, do something #
+                pass
+        if memcount != 1:
+            log.warning(f'PM admin [ctx.author.name] auth failed (Found on {memcount} Servers)')
+            # PM to tell them they are admins on multiple servers
+            return False
+        else:
+            if admin:
+                return True
+            else:
+                return False
+    else:
+        if ctx.member.roles.has(644205730395586570):
+            return True
+        else:
+            return False
+
+
 def filter_details(name, tags, labels):
     details = []
     for line in labels:
@@ -208,7 +282,7 @@ def filter_details(name, tags, labels):
 
 class Item:
 
-    def __init__(self, itemid):
+    def __init__(self, guildid, itemid):
         self.name = None
         self.exists = False
         self.id = itemid
@@ -232,7 +306,7 @@ class Item:
         self.tooltip = []
 
     async def fetch(self):
-        itemdata = await tsmclient.price(self.id, server.lower(), faction.lower())
+        itemdata = await tsmbot.price(self.id, server.lower(), faction.lower())
         if not itemdata:
             return False
         else:
@@ -300,7 +374,7 @@ class Player:
 
     async def fetch(self):
         for kkey, vval in RZONE.items():
-            parselist = await wclclient.parses(self.playername, server, region, zone=kkey)
+            parselist = await wclbot.parses(self.playername, server, region, zone=kkey)
             if len(parselist) != 0 and 'error' not in parselist:
                 self.totalencounters = self.totalencounters + len(parselist)
                 if kkey == 1000:
@@ -328,7 +402,7 @@ class Player:
                             self.playerspec = encounter[1]['spec']
                         else:
                             self.playerrole = encounter[1]['spec']
-                    reporttable = await wclclient.tables('casts', encounter[1]['reportID'], start=0, end=18000)
+                    reporttable = await wclbot.tables('casts', encounter[1]['reportID'], start=0, end=18000)
                     for entry in reporttable['entries']:
                         if entry['name'] == self.playername:
                             if 'spec' in entry and self.playerspec == "Not Available":
@@ -355,18 +429,18 @@ class Player:
             return None
 
 
-@client.event
+@bot.event
 async def on_ready():
-        log.log("SUCCESS", f"Discord logged in as {client.user.name} id {client.user.id}")
+        log.log("SUCCESS", f"Discord logged in as {bot.user.name} id {bot.user.id}")
         activity = discord.Game(name="Type ?help")
         try:
-            await client.change_presence(status=discord.Status.online, activity=activity)
+            await bot.change_presence(status=discord.Status.online, activity=activity)
         except:
             log.error("Exiting")
 
 
 async def fight_data(fid):
-    a = await wclclient.fights(fid)
+    a = await wclbot.fights(fid)
     kills = 0
     wipes = 0
     size = 0
@@ -392,12 +466,12 @@ def logcommand(ctx):
     return True
 
 
-async def messagesend(ctx, embed, allowgeneral=False, reject=True, adminonly=False):
+async def messagesend(ctx, embed, allowgeneral=False, reject=True, adminonly=False, rootonly=False):
     try:
         if type(ctx.message.channel) == discord.channel.DMChannel:
             return await ctx.message.author.send(embed=embed)
         # elif str(ctx.message.channel) != "bot-channel" or (not allowgeneral and str(ctx.message.channel) == "general"):
-        #    role = str(discord.utils.get(ctx.message.author.roles, name="admin"))
+        # role = str(discord.utils.get(ctx.message.author.roles, name="admin"))
             # if role != "admin":
             #    await ctx.message.delete()
             # if reject and role != "admin":
@@ -413,14 +487,15 @@ async def messagesend(ctx, embed, allowgeneral=False, reject=True, adminonly=Fal
         log.exception("Critical error in message send")
 
 
-@client.event
+@bot.event
 async def on_error(event, *args, **kwargs):
     message = args[0]
     log.error(traceback.format_exc())
-    await client.send_message(message.channel, "error")
+    await bot.send_message(message.channel, "error")
 
 
-@client.event
+'''
+@bot.event
 async def on_command_error(ctx, error):
     try:
         if isinstance(error, commands.CommandNotFound):
@@ -438,14 +513,15 @@ async def on_command_error(ctx, error):
             # await messagesend(ctx, embed, allowgeneral=True, reject=False)
     except:
         log.exception("command error: ")
+'''
 
 
-@client.command(name="last", aliases=["lastraid", "lastraids", "raids"])
+@bot.command(name="last", aliases=["lastraid", "lastraids", "raids"])
 @commands.check(logcommand)
 async def lastraids(ctx, *args):
     embed = discord.Embed(description="**Please wait, fetching information...**", color=INFO_COLOR)
     respo = await messagesend(ctx, embed, allowgeneral=True, reject=False)
-    enclist = await wclclient.guild(guild, server, region)
+    enclist = await wclbot.guild(guild, server, region)
     a = 1
     nzone = 0
     tt = 0
@@ -494,12 +570,12 @@ async def lastraids(ctx, *args):
     await messagesend(ctx, embed, allowgeneral=True, reject=False)
 
 
-@client.command(name="news", aliases=["wownews", "warcraftnews"])
+@bot.command(name="news", aliases=["wownews", "warcraftnews"])
 @commands.check(logcommand)
 async def news(ctx, *args):
     embed = discord.Embed(description="Please wait, fetching information...", color=INFO_COLOR)
     respo = await messagesend(ctx, embed, allowgeneral=True, reject=False)
-    news = await tsmclient.news()
+    news = await tsmbot.news()
     embed = discord.Embed(title=f'World of Warcraft Classic News', color=INFO_COLOR)
     for each in news:
         embed.add_field(name=f"**{each['title']}**", value=f"{fix_news_time(each['pubDate'])}\n[{each['content']}]({each['link']})", inline=False)
@@ -507,7 +583,7 @@ async def news(ctx, *args):
     await messagesend(ctx, embed, allowgeneral=True, reject=False)
 
 
-@client.command(name="info", aliases=["player", "playerinfo"])
+@bot.command(name="info", aliases=["player", "playerinfo"])
 @commands.check(logcommand)
 async def info(ctx, *args):
     if args:
@@ -551,7 +627,7 @@ async def info(ctx, *args):
         await messagesend(ctx, embed, allowgeneral=True, reject=False)
 
 
-@client.command(name="gear", aliases=["playergear"])
+@bot.command(name="gear", aliases=["playergear"])
 @commands.check(logcommand)
 async def gear(ctx, *args):
     if args:
@@ -591,7 +667,7 @@ async def gear(ctx, *args):
         await messagesend(ctx, embed, allowgeneral=False, reject=True)
 
 
-@client.command(name="item", aliases=["price", "itemprice"])
+@bot.command(name="item", aliases=["price", "itemprice"])
 @commands.check(logcommand)
 async def item(ctx, *args):
     if args:
@@ -599,7 +675,7 @@ async def item(ctx, *args):
         respo = await messagesend(ctx, embed, allowgeneral=True, reject=False)
         if not isinstance(args[0], Number):
             argstring = ' '.join(args)
-            itemdata = await tsmclient.search(query=argstring, limit=1, threshold=search_threshold)
+            itemdata = await tsmbot.search(query=argstring, limit=1, threshold=search_threshold)
             if len(itemdata) != 0:
                 itemid = itemdata[0]['itemId']
             else:
@@ -672,7 +748,7 @@ async def item(ctx, *args):
         await messagesend(ctx, embed, allowgeneral=False, reject=True)
 
 
-@client.command(name="setting", aliases=["set", "settings"])
+@bot.command(name="setting", aliases=["set", "settings"])
 @commands.check(logcommand)
 async def setting(ctx, *args):
     if args:
@@ -700,8 +776,35 @@ async def setting(ctx, *args):
         await ctx.message.delete()
 
 
+@bot.command(name="admin", aliases=["root"], pass_context=True)
+@commands.check(logcommand)
+#@commands.check(is_admin)
+async def admin(ctx, *args):
+    #pprint(ctx.guild.id)
+    #pprint(dir(ctx.message.author))
+    pprint(await user_info(ctx))
 
-@client.command(name="help", aliases=["helpme", "commands"])
+'''
+    if args:
+        if args[0].startswith('con') or args[0] == 'servers':
+            embed = discord.Embed(title="Servers Connected:", description=f"Discord Latency: {truncate_float(bot.latency, 2)}", color=HELP_COLOR)
+            for eguild in bot.guilds:
+                msg = f"ServerID: {eguild.id}\nShardID: {eguild.shard_id}\nChunked: {eguild.chunked}\nClients: {eguild.member_count}\n\n"
+                embed.add_field(name=f"{eguild.name}", value=msg)
+            async for each in bot.fetch_guilds():
+                pprint(each)
+            await ctx.message.author.send(embed=embed)
+        if args[0] == 'invite':
+            msg = 'https://discord.com/oauth2/authorize?bot_id=750867600250241086&scope=bot&permissions=604302400'
+            embed = discord.Embed(description=msg, color=HELP_COLOR)
+            await messagesend(ctx, embed, allowgeneral=False, reject=True)
+    else:
+        msg = f"You must specify an admin command"
+        embed = discord.Embed(description=msg, color=FAIL_COLOR)
+        await messagesend(ctx, embed, allowgeneral=False, reject=True)
+'''
+
+@bot.command(name="help", aliases=["helpme", "commands"])
 @commands.check(logcommand)
 async def help(ctx):
     msg = "Commands can be privately messaged directly to the bot or in channels"
@@ -718,7 +821,7 @@ async def help(ctx):
 
 
 def main():
-    client.run(discordkey)
+    bot.run(discordkey)
 
 
 if __name__ == '__main__':
@@ -726,8 +829,8 @@ if __name__ == '__main__':
         main()
     except KeyboardInterrupt:
         log.info(f'Termination signal [KeyboardInterrupt] Closing web sessions.')
-        wclclient.close()
-        tsmclient.close()
+        wclbot.close()
+        tsmbot.close()
         log.info(f'Exiting.')
         exit(0)
         try:
