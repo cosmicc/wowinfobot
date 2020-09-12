@@ -7,6 +7,7 @@ from math import trunc
 from numbers import Number
 from os import _exit, path, stat
 from sys import exit
+from time import time
 
 import discord
 from discord.ext import commands
@@ -42,40 +43,31 @@ if not path.exists(configfile) or stat(configfile).st_size == 0:
     log.error(f"Config file: {configfile} doesn't exist or is empty. Exiting.")
     exit(1)
 
-configdata = ConfigParser()
-configdata.read(configfile)
+systemconfig = ConfigParser()
+systemconfig.read(configfile)
 
-configtemplate = {'general': ['loglevel', 'logfile'], 'server': ['server_name', 'server_region', 'server_timezone', 'guild_name', 'faction'], 'discord': ['command_prefix', 'api_key'], 'warcraftlogs_api': ['api_url', 'api_key'], 'blizzard_api': ['api_url', 'client_id', 'client_secret'], 'tsm_api': ['api_url', 'fuzzy_search_threshold']}
+configtemplate = {'general': ['loglevel', 'logfile'], 'discord': ['api_key'], 'warcraftlogs_api': ['api_url'], 'blizzard_api': ['api_url'], 'tsm_api': ['api_url']}
 
 for section, options in configtemplate.items():
-    if not configdata.has_section(section):
+    if not systemconfig.has_section(section):
         log.error(f'Error: Missing configuration section {section} in config file: {configfile}. Exiting.')
         exit(1)
     else:
         for option in options:
-            if not configdata.has_option(section, option):
+            if not systemconfig.has_option(section, option):
                 log.error(f'Error: Missing config option {option} in {section} in config file: {configfile}. Exiting.')
                 exit(1)
 
-logfile = configdata.get("general", "logfile")
-loglevel = configdata.get("general", "loglevel")
-redis_host = configdata.get("general", "redis_host")
-redis_port = configdata.get("general", "redis_port")
-redis_db = configdata.get("general", "redis_db")
-server = configdata.get("server", "server_name").capitalize()
-region = configdata.get("server", "server_region").upper()
-servertimezone = configdata.get("server", "server_timezone")
-guild = configdata.get("server", "guild_name").capitalize()
-faction = configdata.get("server", "faction").capitalize()
-command_prefix = configdata.get("discord", "command_prefix")
-discordkey = configdata.get("discord", "api_key")
-bliz_url = configdata.get("blizzard_api", "api_url")
-bliz_id = configdata.get("blizzard_api", "client_id")
-bliz_secret = configdata.get("blizzard_api", "client_secret")
-wcl_api = configdata.get("warcraftlogs_api", "api_key")
-wcl_url = configdata.get("warcraftlogs_api", "api_url")
-tsm_url = configdata.get("tsm_api", "api_url")
-search_threshold = configdata.get("tsm_api", "fuzzy_search_threshold")
+logfile = systemconfig.get("general", "logfile")
+loglevel = systemconfig.get("general", "loglevel")
+redis_host = systemconfig.get("general", "redis_host")
+redis_port = systemconfig.get("general", "redis_port")
+redis_db = systemconfig.get("general", "redis_db")
+command_prefix = systemconfig.get("discord", "command_prefix")
+discordkey = systemconfig.get("discord", "api_key")
+bliz_url = systemconfig.get("blizzard_api", "api_url")
+wcl_url = systemconfig.get("warcraftlogs_api", "api_url")
+tsm_url = systemconfig.get("tsm_api", "api_url")
 
 log.debug(f'System configuration loaded successfully from {configfile}')
 
@@ -89,9 +81,9 @@ log.debug('Discord class initalized')
 
 redis = RedisPool(redis_host, redis_port, redis_db)
 bot.loop.create_task(redis.connect())
-wclbot = WarcraftLogsAPI(wcl_url, wcl_api)
-log.debug('WarcraftLogsAPI class initalized')
-tsmbot = NexusAPI(tsm_url)
+# wclbot = WarcraftLogsAPI(wcl_url, wcl_api)
+# log.debug('WarcraftLogsAPI class initalized')
+tsmclient = NexusAPI(tsm_url)
 log.debug('NexusAPI class initalized')
 
 SUCCESS_COLOR = 0x00FF00
@@ -130,13 +122,13 @@ def epochtz(epoch, servertimezone):
     return (int(tzepoch))
 
 
-def convert_time(dtime, timeonly=False, dateonly=False):
+def convert_time(dtime, servertimezone, timeonly=False, dateonly=False):
     if timeonly:
-        return datetime.fromtimestamp(epochtz(dtime)).strftime('%-I:%M%p')
+        return datetime.fromtimestamp(epochtz(dtime, servertimezone)).strftime('%-I:%M%p')
     elif dateonly:
-        return datetime.fromtimestamp(epochtz(dtime)).strftime('%m/%d/%y')
+        return datetime.fromtimestamp(epochtz(dtime, servertimezone)).strftime('%m/%d/%y')
     else:
-        return datetime.fromtimestamp(epochtz(dtime)).strftime('%m/%d/%y %-I:%M%p')
+        return datetime.fromtimestamp(epochtz(dtime, servertimezone)).strftime('%m/%d/%y %-I:%M%p')
 
 
 def fix_item_time(rawtime, servertimezone):
@@ -203,10 +195,11 @@ def convertprice(rawprice):
         return f'{gold}g {silver}s {copper}c'
 
 
-async def user_info(ctx):
-    if type(ctx.message.channel) == discord.channel.DMChannel:
+async def user_info(message):
+    startt = time()
+    if type(message.channel) == discord.channel.DMChannel:
         for guild in bot.guilds:
-            member = discord.utils.get(guild.members, id=ctx.author.id)
+            member = discord.utils.get(guild.members, id=message.author.id)
             if member:
                 is_admin_role = False
                 is_user_role = False
@@ -219,44 +212,45 @@ async def user_info(ctx):
                         is_admin_role = True
                     if role.id == user_id:
                         is_user_role = True
-                return {'user_id': ctx.author.id, 'user_name': ctx.author.name, 'guild_id': guild.id, 'channel': 'DMChannel', 'is_member': True, 'is_user_role': is_user_role, 'is_admin_role': is_admin_role}
+                log.debug(f'func:user_info time: {startt-time()}')
+                return {'user_id': message.author.id, 'user_name': message.author.name, 'guild_id': guild.id, 'guild_name': guild.name, 'channel': 'DMChannel', 'is_member': True, 'is_user_role': is_user_role, 'is_admin_role': is_admin_role}
             else:
-                return {'user_id': ctx.author.id, 'user_name': ctx.author.name, 'guild_id': None, 'channel': 'DMChannel', 'is_member': False, 'is_user_role': False, 'is_admin_role': False}
+                return {'user_id': message.author.id, 'user_name': message.author.name, 'guild_id': None, 'guild_name': None, 'channel': 'DMChannel', 'is_member': False, 'is_user_role': False, 'is_admin_role': False}
 
     else:
         is_admin_role = False
         is_user_role = False
-        guildconfig = GuildConfigParser(redis, ctx.author.guild.id)
+        guildconfig = GuildConfigParser(redis, message.author.guild.id)
         await guildconfig.read()
         admin_id = guildconfig.get("discord", "admin_role_id")
         user_id = guildconfig.get("discord", "user_role_id")
-        member = discord.utils.get(ctx.author.guild.members, id=ctx.author.id)
+        member = discord.utils.get(message.author.guild.members, id=message.author.id)
         for role in member.roles:
             if role.id == admin_id:
                 is_admin_role = True
             if role.id == user_id:
                 is_user_role = True
-        return {'user_id': ctx.author.id, 'user_name': ctx.author.name, 'guild_id': ctx.author.guild.id, 'channel': ctx.message.channel.id, 'is_member': True, 'is_user_role': is_user_role, 'is_admin_role': is_admin_role}
+        return {'user_id': message.author.id, 'user_name': message.author.name, 'guild_id': message.author.guild.id, 'guild_name': message.author.guild.name, 'channel': message.channel.id, 'is_member': True, 'is_user_role': is_user_role, 'is_admin_role': is_admin_role}
 
 
-async def is_admin(ctx):
+async def is_admin(message):
     admin = False
     memcount = 0
-    if type(ctx.message.channel) == discord.channel.DMChannel:
+    if type(message.message.channel) == discord.channel.DMChannel:
         for guild in bot.guilds:
-            if discord.utils.get(guild.members, id=ctx.author.id):
+            if discord.utils.get(guild.members, id=message.author.id):
                 memcount = memcount + 1
                 pprint(guild.roles)
                 if discord.utils.get(guild.roles, id=644205730395586570):
                     admin = True
-                # print(discord.utils.get(guild.members, id=ctx.author.id))
+                # print(discord.utils.get(guild.members, id=message.author.id))
 
             # the member is in the server, do something #
             else:
                 # the member is not in the server, do something #
                 pass
         if memcount != 1:
-            log.warning(f'PM admin [ctx.author.name] auth failed (Found on {memcount} Servers)')
+            log.warning(f'PM admin [message.author.name] auth failed (Found on {memcount} Servers)')
             # PM to tell them they are admins on multiple servers
             return False
         else:
@@ -265,7 +259,7 @@ async def is_admin(ctx):
             else:
                 return False
     else:
-        if ctx.member.roles.has(644205730395586570):
+        if message.member.roles.has(644205730395586570):
             return True
         else:
             return False
@@ -282,11 +276,13 @@ def filter_details(name, tags, labels):
 
 class Item:
 
-    def __init__(self, guildid, itemid):
+    def __init__(self, server, faction, itemid):
         self.name = None
         self.exists = False
         self.id = itemid
         self.icon = None
+        self.server = server
+        self.faction = faction
         self.tags = []
         self.requiredlevel = 'Not Available'
         self.level = 'Not Available'
@@ -306,9 +302,9 @@ class Item:
         self.tooltip = []
 
     async def fetch(self):
-        itemdata = await tsmbot.price(self.id, server.lower(), faction.lower())
-        if not itemdata:
-            return False
+        itemdata = await tsmclient.price(self.id, self.server.lower(), self.faction.lower())
+        if 'error' in itemdata:
+            return itemdata
         else:
             self.exists = True
             self.name = itemdata['name']
@@ -339,19 +335,21 @@ class Player:
 
     async def filter_last_encounters(self, npl):
         for entry in npl:
-            if epochtz(entry['startTime']) > min(self.edl):
+            if epochtz(entry['startTime'], self.timezone) > min(self.edl):
                 if entry['reportID'] in self.tpl:
-                    del self.edl[self.tpl[entry["reportID"]]]
-                    del self.tpl[entry["reportID"]]
-                    self.edl.update({epochtz(entry["startTime"]): entry})
-                    self.tpl.update({entry["reportID"]: epochtz(entry["startTime"])})
+                    if self.tpl[entry["reportID"]] in self.edl:
+                        del self.edl[self.tpl[entry["reportID"]]]
+                    if entry["reportID"] in self.tpl:
+                        del self.tpl[entry["reportID"]]
+                    self.edl.update({epochtz(entry["startTime"], self.timezone): entry})
+                    self.tpl.update({entry["reportID"]: epochtz(entry["startTime"], self.timezone)})
                 else:
-                    self.edl.update({epochtz(entry["startTime"]): entry})
-                    self.tpl.update({entry["reportID"]: epochtz(entry["startTime"])})
+                    self.edl.update({epochtz(entry["startTime"], self.timezone): entry})
+                    self.tpl.update({entry["reportID"]: epochtz(entry["startTime"], self.timezone)})
                     if len(self.edl) > 5:
                         del self.edl[min(self.edl)]
 
-    def __init__(self, playername):
+    def __init__(self, gconfig, aclient, playername):
         self.playername = playername.capitalize()
         self.exists = False
         self.playerclass = "Not Available"
@@ -371,10 +369,13 @@ class Player:
         self.geardate = "0"
         self.edl = {0: 0}
         self.tpl = {0: 0}
+        self.client = aclient
+        self.guildconfig = gconfig
+        self.timezone = gconfig.get("server", "server_timezone")
 
     async def fetch(self):
         for kkey, vval in RZONE.items():
-            parselist = await wclbot.parses(self.playername, server, region, zone=kkey)
+            parselist = await self.client.parses(self.playername, self.guildconfig.get("server", "server_name").title(), self.guildconfig.get("server", "server_region").upper(), zone=kkey)
             if len(parselist) != 0 and 'error' not in parselist:
                 self.totalencounters = self.totalencounters + len(parselist)
                 if kkey == 1000:
@@ -402,7 +403,7 @@ class Player:
                             self.playerspec = encounter[1]['spec']
                         else:
                             self.playerrole = encounter[1]['spec']
-                    reporttable = await wclbot.tables('casts', encounter[1]['reportID'], start=0, end=18000)
+                    reporttable = await self.client.tables('casts', encounter[1]['reportID'], start=0, end=18000)
                     for entry in reporttable['entries']:
                         if entry['name'] == self.playername:
                             if 'spec' in entry and self.playerspec == "Not Available":
@@ -419,10 +420,10 @@ class Player:
                                     zone = BOSSREF[encounter[1]['encounterName']]
                                     if zone == 1005:
                                         self.gearlist = entry['gear']
-                                        self.geardate = convert_time(encounter[1]['startTime'], dateonly=True)
+                                        self.geardate = convert_time(encounter[1]['startTime'], self.timezone, dateonly=True)
                                     elif len(self.gearlist) < 1:
                                         self.gearlist = entry['gear']
-                                        self.geardate = convert_time(encounter[1]['startTime'], dateonly=True)
+                                        self.geardate = convert_time(encounter[1]['startTime'], self.timezone, dateonly=True)
             self.lastencounter = self.lastencounters[len(self.lastencounters) - 1][1]
             return True
         else:
@@ -432,19 +433,19 @@ class Player:
 @bot.event
 async def on_ready():
         log.log("SUCCESS", f"Discord logged in as {bot.user.name} id {bot.user.id}")
-        activity = discord.Game(name="Type ?help")
+        activity = discord.Game(name="Msg Me!")
         try:
             await bot.change_presence(status=discord.Status.online, activity=activity)
         except:
             log.error("Exiting")
 
 
-async def fight_data(fid):
-    a = await wclbot.fights(fid)
+async def fight_data(wclclient, fid):
+    fight = await wclclient.fights(fid)
     kills = 0
     wipes = 0
     size = 0
-    for key, value in a.items():
+    for key, value in fight.items():
         if key == 'fights':
             for each in value:
                 if 'kill' in each:
@@ -457,34 +458,56 @@ async def fight_data(fid):
     return kills, wipes, size, lastboss
 
 
-def logcommand(ctx):
-    if type(ctx.message.channel) == discord.channel.DMChannel:
+def logcommand(message):
+    if type(message.channel) == discord.channel.DMChannel:
         dchan = "Direct Message"
     else:
-        dchan = ctx.message.channel
-    log.log("INFO", f"Responding to [{ctx.message.content}] request from [{ctx.message.author}] in [#{dchan}]")
+        dchan = message.channel
+    log.log("INFO", f"Responding to [{message.content}] request from [{message.author}] in [#{dchan}]")
     return True
 
 
-async def messagesend(ctx, embed, allowgeneral=False, reject=True, adminonly=False, rootonly=False):
+async def wait_message(message):
+    embed = discord.Embed(description="Please wait, fetching information...", color=INFO_COLOR)
+    return await messagesend(message, embed, allowgeneral=True, reject=False)
+
+
+def error_embed(message):
+    return discord.Embed(description="Resource unavailable, please try again later.", color=FAIL_COLOR)
+
+
+async def messagesend(message, embed, allowgeneral=False, reject=True, adminonly=False, rootonly=False):
     try:
-        if type(ctx.message.channel) == discord.channel.DMChannel:
-            return await ctx.message.author.send(embed=embed)
-        # elif str(ctx.message.channel) != "bot-channel" or (not allowgeneral and str(ctx.message.channel) == "general"):
-        # role = str(discord.utils.get(ctx.message.author.roles, name="admin"))
+        if type(message.channel) == discord.channel.DMChannel:
+            return await message.author.send(embed=embed)
+        # elif str(message.message.channel) != "bot-channel" or (not allowgeneral and str(message.message.channel) == "general"):
+        # role = str(discord.utils.get(message.message.author.roles, name="admin"))
             # if role != "admin":
-            #    await ctx.message.delete()
+            #    await message.message.delete()
             # if reject and role != "admin":
             #    rejectembed = discord.Embed(description=rejectmsg, color=HELP_COLOR)
-            #    return await ctx.message.author.send(embed=rejectembed)
+            #    return await message.message.author.send(embed=rejectembed)
             # elif role != "admin":
-            #    return await ctx.message.author.send(embed=embed)
+            #    return await message.message.author.send(embed=embed)
             # else:
-        #    return await ctx.message.channel.send(embed=embed)
+        #    return await message.message.channel.send(embed=embed)
         else:
-            return await ctx.message.channel.send(embed=embed)
+            return await message.channel.send(embed=embed)
     except:
         log.exception("Critical error in message send")
+
+
+async def checkhttperrors(message, respo, checkdata):
+    if 'error' in checkdata[0]:
+        if checkdata[0]['error'] == 401:
+            embed = discord.Embed(description="API key invalid. Check settings.", color=FAIL_COLOR)
+        else:
+            embed = discord.Embed(description="Resource unavailable, please try again later.", color=FAIL_COLOR)
+        await respo.delete()
+        await messagesend(message, embed, allowgeneral=True, reject=False)
+        return False
+    else:
+        return True
 
 
 @bot.event
@@ -494,295 +517,416 @@ async def on_error(event, *args, **kwargs):
     await bot.send_message(message.channel, "error")
 
 
+@bot.event
+async def on_message(message):
+    if message.author.id != 750867600250241086:
+        user = await user_info(message)
+        if user['guild_id'] is None:
+            pass
+        else:
+            guildconfig = GuildConfigParser(redis, user['guild_id'])
+            await guildconfig.read()
+            if message.content.startswith(guildconfig.get('discord', 'command_prefix')):
+                args = message.content[1:].split(' ')
+                if args[0].lower() in ['raids', 'last', 'lastraids', 'lastraid']:
+                    args.pop(0)
+                    await lastraids(message, user, guildconfig, *args)
+                elif args[0].lower() in ["news", "wownews", "warcraftnews"]:
+                    args.pop(0)
+                    await news(message, user, guildconfig, *args)
+                elif args[0].lower() in ["help", "commands", "helpme"]:
+                    args.pop(0)
+                    await help(message, user, guildconfig, *args)
+                elif args[0].lower() in ["setting", "set", "settings"]:
+                    args.pop(0)
+                    await setting(message, user, guildconfig, *args)
+                elif args[0].lower() in ["player", "playerinfo", "pinfo"]:
+                    args.pop(0)
+                    await info(message, user, guildconfig, *args)
+                elif args[0].lower() in ["gear", "playergear", "playeritems"]:
+                    args.pop(0)
+                    await gear(message, user, guildconfig, *args)
+                elif args[0].lower() in ["item", "price", "itemprice", "iinfo"]:
+                    args.pop(0)
+                    await item(message, user, guildconfig, *args)
+            else:
+                if type(message.channel) == discord.channel.DMChannel:
+                    await help(message, user, guildconfig)
+
+
+
 '''
 @bot.event
-async def on_command_error(ctx, error):
+async def on_command_error(message, error):
     try:
         if isinstance(error, commands.CommandNotFound):
-            log.warning(f"Invalid command [{ctx.message.content}] sent from [{ctx.message.author}]")
-            msg = f"Command **`{ctx.message.content}`** does not exist.  **`{command_prefix}help`** for a list and description of all the commands."
+            log.warning(f"Invalid command [{message.message.content}] sent from [{message.message.author}]")
+            msg = f"Command **`{message.message.content}`** does not exist.  **`{command_prefix}help`** for a list and description of all the commands."
             embed = discord.Embed(description=msg, color=FAIL_COLOR)
-            await messagesend(ctx, embed, allowgeneral=False, reject=False)
+            await messagesend(message, embed, allowgeneral=False, reject=False)
         elif isinstance(error, commands.CheckFailure):
             log.warning(f"discord check failed: {error}")
             embed = discord.Embed(description="**An error has occurred, contact Arbin.**", color=FAIL_COLOR)
-            # await messagesend(ctx, embed, allowgeneral=True, reject=False)
+            # await messagesend(message, embed, allowgeneral=True, reject=False)
         else:
-            log.exception(f"discord bot error for {ctx.message.author}: {ctx.message.content} - {error}")
+            log.exception(f"discord bot error for {message.message.author}: {message.message.content} - {error}")
             embed = discord.Embed(description="**An error has occurred, contact Arbin.**", color=FAIL_COLOR)
-            # await messagesend(ctx, embed, allowgeneral=True, reject=False)
+            # await messagesend(message, embed, allowgeneral=True, reject=False)
     except:
         log.exception("command error: ")
 '''
 
 
-@bot.command(name="last", aliases=["lastraid", "lastraids", "raids"])
-@commands.check(logcommand)
-async def lastraids(ctx, *args):
-    embed = discord.Embed(description="**Please wait, fetching information...**", color=INFO_COLOR)
-    respo = await messagesend(ctx, embed, allowgeneral=True, reject=False)
-    enclist = await wclbot.guild(guild, server, region)
-    a = 1
-    nzone = 0
-    tt = 0
-    if args:
-        if args[0].lower() == "mc":
-            nzone = 1000
-            tt = RZONE[nzone]
-        elif args[0].lower() == "zg":
-            nzone = 1003
-            tt = RZONE[nzone]
-        elif args[0].lower() == "ony" or args[0].lower() == "onyxia":
-            nzone = 1001
-            tt = RZONE[nzone]
-        elif args[0].lower() == "bwl":
-            nzone = 1002
-            tt = RZONE[nzone]
-        elif args[0].lower() == "aq20":
-            nzone = 1004
-            tt = RZONE[nzone]
-        elif args[0].lower() == "aq40":
-            nzone = 1005
-            tt = RZONE[nzone]
-        elif args[0].lower() == "aq":
-            if args[1] == "20":
-                nzone = 1004
-                tt = RZONE[nzone]
-            if args[1] == "40":
-                nzone = 1005
-                tt = RZONE[nzone]
-        else:
+async def lastraids(message, user, guildconfig, *args):
+    logcommand(message)
+    respo = await wait_message(message)
+    try:
+        wclclient = WarcraftLogsAPI(wcl_url, guildconfig.get('warcraftlogs', 'api_key'))
+        servertimezone = guildconfig.get('server', 'server_timezone')
+        enclist = await wclclient.guild(user['guild_name'], guildconfig.get('server', 'server_name'), guildconfig.get('server', 'server_region'))
+        if await checkhttperrors(message, respo, enclist):
+            a = 1
+            nzone = 0
+            tt = 0
+            if args:
+                if args[0].lower() == "mc":
+                    nzone = 1000
+                    tt = RZONE[nzone]
+                elif args[0].lower() == "zg":
+                    nzone = 1003
+                    tt = RZONE[nzone]
+                elif args[0].lower() == "ony" or args[0].lower() == "onyxia":
+                    nzone = 1001
+                    tt = RZONE[nzone]
+                elif args[0].lower() == "bwl":
+                    nzone = 1002
+                    tt = RZONE[nzone]
+                elif args[0].lower() == "aq20":
+                    nzone = 1004
+                    tt = RZONE[nzone]
+                elif args[0].lower() == "aq40":
+                    nzone = 1005
+                    tt = RZONE[nzone]
+                elif args[0].lower() == "aq":
+                    if args[1] == "20":
+                        nzone = 1004
+                        tt = RZONE[nzone]
+                    if args[1] == "40":
+                        nzone = 1005
+                        tt = RZONE[nzone]
+                else:
+                    await respo.delete()
+                    await message.send(f"Invalid instance {args[0]}")
+            if tt == 0:
+                tttitle = f"Last 5 Logged Raids for {user['guild_name']}"
+            else:
+                tttitle = f"Last 5 Logged {tt} Raids for {user['guild_name']}"
+            embed = discord.Embed(title=tttitle, color=INFO_COLOR)
+            for each in enclist:
+                if (each['zone'] == nzone or nzone == 0) and (a <= 5):
+                    kills, wipes, size, lastboss = await fight_data(wclclient, each['id'])
+                    embed.add_field(name=f"{RZONE[each['zone']]} - {convert_time(each['start'], servertimezone, dateonly=True)} ({each['title']})", value=f"{convert_time (each['start'], servertimezone, timeonly=True)}-{convert_time(each['end'], servertimezone, timeonly=True)} - {elapsedTime(epochtz(each['start'], servertimezone), epochtz(each['end'], servertimezone))}\n[Bosses Killed: ({kills}\{BZONE[each['zone']]}) with {wipes} Wipes - Last Boss: {lastboss}](https://classic.warcraftlogs.com/reports/{each['id']})", inline=False)
+                    a = a + 1
+            if a == 1:
+                embed = discord.Embed(description=f"No raids were found for {guildconfig.get('server', 'guild_name').title()} on {[guildconfig.get('server', 'server_name').title()]}", color=FAIL_COLOR)
+            await wclclient.close()
             await respo.delete()
-            await ctx.send(f"Invalid instance {args[0]}")
-    if tt == 0:
-        tttitle = f"Last 5 Logged Raids for {guild}"
-    else:
-        tttitle = f"Last 5 Logged {tt} Raids for {guild}"
-    embed = discord.Embed(title=tttitle, color=INFO_COLOR)
-    for each in enclist:
-        if (each['zone'] == nzone or nzone == 0) and (a <= 5):
-            kills, wipes, size, lastboss = await fight_data(each['id'])
-            embed.add_field(name=f"{RZONE[each['zone']]} - {convert_time(each['start'], dateonly=True)} ({each['title']})", value=f"{convert_time (each['start'], timeonly=True)}-{convert_time(each['end'], timeonly=True)} - {elapsedTime(epochtz(each['start']), epochtz(each['end']))}\n[Bosses Killed: ({kills}\{BZONE[each['zone']]}) with {wipes} Wipes - Last Boss: {lastboss}](https://classic.warcraftlogs.com/reports/{each['id']})", inline=False)
-            a = a + 1
-    if a == 1:
-        embed = discord.Embed(description=f"No raids were found for {guild.title()} on {server.capitalize()}", color=FAIL_COLOR)
-    await respo.delete()
-    await messagesend(ctx, embed, allowgeneral=True, reject=False)
+            await messagesend(message, embed, allowgeneral=True, reject=False)
+    except:
+        log.exception('Exception in lastraids function')
+        await wclclient.close()
+        await respo.delete()
+        await messagesend(message, error_embed(message), allowgeneral=True, reject=False)
 
 
-@bot.command(name="news", aliases=["wownews", "warcraftnews"])
-@commands.check(logcommand)
-async def news(ctx, *args):
-    embed = discord.Embed(description="Please wait, fetching information...", color=INFO_COLOR)
-    respo = await messagesend(ctx, embed, allowgeneral=True, reject=False)
-    news = await tsmbot.news()
-    embed = discord.Embed(title=f'World of Warcraft Classic News', color=INFO_COLOR)
-    for each in news:
-        embed.add_field(name=f"**{each['title']}**", value=f"{fix_news_time(each['pubDate'])}\n[{each['content']}]({each['link']})", inline=False)
-    await respo.delete()
-    await messagesend(ctx, embed, allowgeneral=True, reject=False)
-
-
-@bot.command(name="info", aliases=["player", "playerinfo"])
-@commands.check(logcommand)
-async def info(ctx, *args):
-    if args:
-        embed = discord.Embed(description="Please wait, fetching information...", color=INFO_COLOR)
-        respo = await messagesend(ctx, embed, allowgeneral=True, reject=False)
-        player = Player(args[0])
-        await player.fetch()
-        if player.exists:
-            embed = discord.Embed(title=f'{args[0].capitalize()} on {region}-{server}', color=INFO_COLOR)
-            # embed.set_author(name=args[0].capitalize())
-            embed.add_field(name=f"Class:", value=f"{player.playerclass}")
-            embed.add_field(name=f"Spec:", value=f"{player.playerspec}")
-            embed.add_field(name=f"Role:", value=f"{player.playerrole}")
-            # embed.add_field(name=f"Gear Enchants:", value=f"{}")
-            # embed.add_field(name=f"Avg Item Level for fight:", value=f"{")
-            # embed.add_field(name=f"Last Fight Percentile:", value=f"{truncate_float(perc, 1)}%")
-            # embed.add_field(name=f"Last Fight Rank:", value="{:,} of {:,}".format(rank, outof))
-            embed.add_field(name=f"Encounters Logged:", value=f"{player.totalencounters}")
-            embed.add_field(name=f"MC Bosses Logged:", value=f"{player.mccount}")
-            embed.add_field(name=f"Ony Raids Logged:", value=f"{player.onycount}")
-            embed.add_field(name=f"BWL Bosses Logged:", value=f"{player.bwlcount}")
-            embed.add_field(name=f"ZG Bosses Logged:", value=f"{player.zgcount}")
-            embed.add_field(name=f"AQ20 Bosses Logged:", value=f"{player.aq20count}")
-            embed.add_field(name=f"AQ40 Bosses Logged:", value=f"{player.aq40count}")
-            elen = len(player.lastencounters) - 1
-            msg = ""
-            while elen >= 0:
-                msg = msg + f"{convert_time(player.lastencounters[elen][1]['startTime'], dateonly=True)}  [{RZONE[BOSSREF[player.lastencounters[elen][1]['encounterName']]]}](https://classic.warcraftlogs.com/reports/{player.lastencounters[elen][1]['reportID']}) Last Boss: {player.lastencounters[elen][1]['encounterName']}\n"
-                elen = elen - 1
-            embed.add_field(name="Last 5 Raids Logged:", value=msg, inline=False)
+async def news(message, user, guildconfig, *args):
+    logcommand(message)
+    respo = await wait_message(message)
+    try:
+        news = await tsmclient.news()
+        if await checkhttperrors(message, respo, news):
+            embed = discord.Embed(title=f'World of Warcraft Classic News', color=INFO_COLOR)
+            for each in news:
+                embed.add_field(name=f"**{each['title']}**", value=f"{fix_news_time(each['pubDate'], guildconfig.get('server','server_timezone'))}\n[{each['content']}]({each['link']})", inline=False)
             await respo.delete()
-            await messagesend(ctx, embed, allowgeneral=True, reject=False)
+            await messagesend(message, embed, allowgeneral=True, reject=False)
+    except:
+        log.exception('Exception in news function')
+        await respo.delete()
+        await messagesend(message, error_embed(message), allowgeneral=True, reject=False)
+
+
+async def info(message, user, guildconfig, *args):
+    logcommand(message)
+    respo = await wait_message(message)
+    try:
+        if args:
+            servertimezone = guildconfig.get('server', 'server_timezone')
+            wclclient = WarcraftLogsAPI(wcl_url, guildconfig.get('warcraftlogs', 'api_key'))
+            player = Player(guildconfig, wclclient, args[0])
+            await player.fetch()
+            await wclclient.close()
+            if player.exists:
+                embed = discord.Embed(title=f'{args[0].capitalize()} on {guildconfig.get("server", "server_region".upper())}-{guildconfig.get("server", "server_name").title()}', color=INFO_COLOR)
+                # embed.set_author(name=args[0].capitalize())
+                embed.add_field(name=f"Class:", value=f"{player.playerclass}")
+                embed.add_field(name=f"Spec:", value=f"{player.playerspec}")
+                embed.add_field(name=f"Role:", value=f"{player.playerrole}")
+                # embed.add_field(name=f"Gear Enchants:", value=f"{}")
+                # embed.add_field(name=f"Avg Item Level for fight:", value=f"{")
+                # embed.add_field(name=f"Last Fight Percentile:", value=f"{truncate_float(perc, 1)}%")
+                # embed.add_field(name=f"Last Fight Rank:", value="{:,} of {:,}".format(rank, outof))
+                embed.add_field(name=f"Encounters Logged:", value=f"{player.totalencounters}")
+                embed.add_field(name=f"MC Bosses Logged:", value=f"{player.mccount}")
+                embed.add_field(name=f"Ony Raids Logged:", value=f"{player.onycount}")
+                embed.add_field(name=f"BWL Bosses Logged:", value=f"{player.bwlcount}")
+                embed.add_field(name=f"ZG Bosses Logged:", value=f"{player.zgcount}")
+                embed.add_field(name=f"AQ20 Bosses Logged:", value=f"{player.aq20count}")
+                embed.add_field(name=f"AQ40 Bosses Logged:", value=f"{player.aq40count}")
+                elen = len(player.lastencounters) - 1
+                msg = ""
+                while elen >= 0:
+                    if player.lastencounters[elen][1] != 0:
+                        msg = msg + f"{convert_time(player.lastencounters[elen][1]['startTime'], servertimezone, dateonly=True)}  [{RZONE[BOSSREF[player.lastencounters[elen][1]['encounterName']]]}](https://classic.warcraftlogs.com/reports/{player.lastencounters[elen][1]['reportID']}) Last Boss: {player.lastencounters[elen][1]['encounterName']}\n"
+                    elen = elen - 1
+                embed.add_field(name="Last 5 Raids Logged:", value=msg, inline=False)
+                await respo.delete()
+                await messagesend(message, embed, allowgeneral=True, reject=False)
+            else:
+                msg = "Cannot find character {} in warcraft logs".format(player.playername)
+                embed = discord.Embed(description=msg, color=FAIL_COLOR)
+                await respo.delete()
+                await messagesend(message, embed, allowgeneral=True, reject=False)
         else:
-            msg = "Cannot find character {} in warcraft logs".format(player.playername)
+            msg = f"You must specify a game character to get info for"
+            embed = discord.Embed(description=msg, color=FAIL_COLOR)
+            await messagesend(message, embed, allowgeneral=True, reject=False)
+    except:
+        log.exception(f'Exception in player info function')
+        await respo.delete()
+        await messagesend(message, error_embed(message), allowgeneral=True, reject=False)
+
+
+async def gear(message, user, guildconfig, *args):
+    logcommand(message)
+    respo = await wait_message(message)
+    playername = args[0]
+    try:
+        if args:
+            wclclient = WarcraftLogsAPI(wcl_url, guildconfig.get('warcraftlogs', 'api_key'))
+            player = Player(guildconfig, wclclient, playername)
+            await player.fetch()
+            await wclclient.close()
+            # Addfail check like items #####################
+            if player.exists:
+                embed = discord.Embed(title=f"{args[0].capitalize()}'s gear from {player.geardate}", color=INFO_COLOR)
+                for item in player.gearlist:
+                    if 'name' in item and item['slot'] != 3:
+                        if 'itemLevel' in item:
+                            il = f"({item['itemLevel']})"
+                        else:
+                            il = ""
+                        if 'permanentEnchantName' in item:
+                            en = f"{item['permanentEnchantName']}"
+                        else:
+                            en = ""
+                        if 'id' in item:
+                            iid = item['id']
+                        else:
+                            iid = ""
+                        embed.add_field(name=f"{GEAR_ORDER[item['slot']]}:", value=f"**[{item['name']}](https://classic.wowhead.com/item={iid}) {il}**\n{en}", inline=True)
+                await respo.delete()
+                await messagesend(message, embed, allowgeneral=True, reject=False)
+            else:
+                msg = "Cannot find character {} in warcraft logs".format(player.playername)
+                embed = discord.Embed(description=msg, color=FAIL_COLOR)
+                await respo.delete()
+                await messagesend(message, embed, allowgeneral=True, reject=False)
+        else:
+            msg = f"You must specify a game character to list gear for"
             embed = discord.Embed(description=msg, color=FAIL_COLOR)
             await respo.delete()
-            await messagesend(ctx, embed, allowgeneral=True, reject=False)
-    else:
-        msg = f"You must specify a game character to get info for"
-        embed = discord.Embed(description=msg, color=FAIL_COLOR)
-        await messagesend(ctx, embed, allowgeneral=True, reject=False)
+            await messagesend(message, embed, allowgeneral=False, reject=True)
+    except:
+        log.exception(f'Exception in player gear function')
+        await respo.delete()
+        await messagesend(message, error_embed(message), allowgeneral=True, reject=False)
 
 
-@bot.command(name="gear", aliases=["playergear"])
-@commands.check(logcommand)
-async def gear(ctx, *args):
-    if args:
-        embed = discord.Embed(description="Please wait, fetching information...", color=INFO_COLOR)
-        respo = await messagesend(ctx, embed, allowgeneral=True, reject=False)
-        player = Player(args[0])
-        await player.fetch()
-        # Addfail check like items #####################
-        if player.exists:
-            embed = discord.Embed(title=f"{args[0].capitalize()}'s gear from {player.geardate}", color=INFO_COLOR)
-            for item in player.gearlist:
-                if 'name' in item and item['slot'] != 3:
-                    if 'itemLevel' in item:
-                        il = f"({item['itemLevel']})"
-                    else:
-                        il = ""
-                    if 'permanentEnchantName' in item:
-                        en = f"{item['permanentEnchantName']}"
-                    else:
-                        en = ""
-                    if 'id' in item:
-                        iid = item['id']
-                    else:
-                        iid = ""
-                    embed.add_field(name=f"{GEAR_ORDER[item['slot']]}:", value=f"**[{item['name']}](https://classic.wowhead.com/item={iid}) {il}**\n{en}", inline=True)
-            await respo.delete()
-            await messagesend(ctx, embed, allowgeneral=True, reject=False)
+async def item(message, user, guildconfig, *args):
+    logcommand(message)
+    respo = await wait_message(message)
+    try:
+        if args:
+            servertimezone = guildconfig.get("server", "server_timezone")
+            if not isinstance(args[0], Number):
+                argstring = ' '.join(args)
+                itemdata = await tsmclient.search(query=argstring, limit=1, threshold='0.8')
+                if len(itemdata) != 0:
+                    itemid = itemdata[0]['itemId']
+                else:
+                    msg = f"Cannot locate information for item: {argstring.title()}"
+                    embed = discord.Embed(description=msg, color=FAIL_COLOR)
+                    await respo.delete()
+                    await messagesend(message, embed, allowgeneral=False, reject=True)
+                    return None
+            else:
+                itemid = int(args[0])
+            item = Item(guildconfig.get("server", "server_name"), guildconfig.get("server", "faction"), itemid)
+            ires = await item.fetch()
+            if item.exists:
+                if item.lastupdate is None:
+                    dsg = 'Prices not available for this item'
+                else:
+                    dsg = f'Prices from {guildconfig.get("server", "faction").capitalize()} on {guildconfig.get("server", "server_name").title()} at {fix_item_time(item.lastupdate, servertimezone)}'
+                embed = discord.Embed(title="", description=dsg, color=INFO_COLOR)
+                embed.set_author(name=item.name, url=f"https://classic.wowhead.com/item={item.id}", icon_url=item.icon)
+                msg = ""
+                for tag in item.tags:
+                    msg = msg + f"{tag}\n"
+                if msg == "":
+                    msg = "None"
+                embed.add_field(name=f"Tags:", value=msg)
+                embed.add_field(name=f"Item Level:", value=f"{item.level} ")
+                embed.add_field(name=f"Required Level:", value=f"{item.requiredlevel} ")
+                embed.add_field(name=f"Sell Price:", value=f"{convertprice(item.sellprice)} ")
+                embed.add_field(name=f"Vendor Price:", value=f"{convertprice(item.vendorprice)} ")
+                if isinstance(item.current_auctions, Number):
+                    ica = f'**{item.current_auctions:,d}**'
+                else:
+                    ica = f'Not Available'
+                if isinstance(item.current_quantity, Number):
+                    icb = f'**{item.current_quantity:,d}**'
+                else:
+                    icb = f'Not Available'
+                embed.add_field(name=f"Current Auctions/Prices:", value=f"Auctions: **{ica}**\nQuantity Available: **{icb}**\nMarket Value: **{convertprice(item.current_marketvalue)}**\nHistorical Value: **{convertprice(item.current_historicalvalue)}**\nMinimum Buyout: **{convertprice(item.current_minbuyout)}**", inline=False)
+                if isinstance(item.previous_auctions, Number):
+                    ica = f'**{item.previous_auctions:,d}**'
+                else:
+                    ica = f'Not Available'
+                if isinstance(item.previous_quantity, Number):
+                    icb = f'**{item.previous_quantity:,d}**'
+                else:
+                    icb = f'Not Available'
+                embed.add_field(name=f"Previous Auctions/Prices:", value=f"Auctions: **{ica}**\nQuantity Available: **{icb}**\nMarket Value: **{convertprice(item.previous_marketvalue)}**\nHistorical Value: **{convertprice(item.previous_historicalvalue)}**\nMinimum Buyout: **{convertprice(item.previous_minbuyout)}**", inline=False)
+                msg = ""
+                for val in filter_details(item.name, item.tags, item.tooltip):
+                    msg = msg + f"{val}\n"
+                if msg != "":
+                    embed.add_field(name=f"{item.name.title()} Details:", value=msg)
+                await respo.delete()
+                await messagesend(message, embed, allowgeneral=False, reject=True)
+            else:
+                if ires is None:
+                    msg = f"Cannot locate information for item: {item.name.title()}"
+                    embed = discord.Embed(description=msg, color=FAIL_COLOR)
+                    await respo.delete()
+                    await messagesend(message, embed, allowgeneral=False, reject=True)
+                elif not ires:
+                    msg = f"Error retreiving information, please try again later."
+                    embed = discord.Embed(description=msg, color=FAIL_COLOR)
+                    await respo.delete()
+                    await messagesend(message, embed, allowgeneral=False, reject=True)
         else:
-            msg = "Cannot find character {} in warcraft logs".format(player.playername)
+            msg = f"You must specify a item name or item id to get prices for"
             embed = discord.Embed(description=msg, color=FAIL_COLOR)
             await respo.delete()
-            await messagesend(ctx, embed, allowgeneral=True, reject=False)
-    else:
-        msg = f"You must specify a game character to list gear for"
-        embed = discord.Embed(description=msg, color=FAIL_COLOR)
+            await messagesend(message, embed, allowgeneral=False, reject=True)
+    except:
+        log.exception(f'Exception in item function')
         await respo.delete()
-        await messagesend(ctx, embed, allowgeneral=False, reject=True)
+        await messagesend(message, error_embed(message), allowgeneral=True, reject=False)
 
 
-@bot.command(name="item", aliases=["price", "itemprice"])
-@commands.check(logcommand)
-async def item(ctx, *args):
-    if args:
-        embed = discord.Embed(description="Please wait, fetching information...", color=INFO_COLOR)
-        respo = await messagesend(ctx, embed, allowgeneral=True, reject=False)
-        if not isinstance(args[0], Number):
-            argstring = ' '.join(args)
-            itemdata = await tsmbot.search(query=argstring, limit=1, threshold=search_threshold)
-            if len(itemdata) != 0:
-                itemid = itemdata[0]['itemId']
-            else:
-                msg = f"Cannot locate information for item: {argstring.title()}"
-                embed = discord.Embed(description=msg, color=FAIL_COLOR)
-                await respo.delete()
-                await messagesend(ctx, embed, allowgeneral=False, reject=True)
-                return None
-        else:
-            itemid = int(args[0])
-        item = Item(itemid)
-        ires = await item.fetch()
-        if item.exists:
-            if item.lastupdate is None:
-                dsg = 'Prices not available for this item'
-            else:
-                dsg = f'Prices from {faction.capitalize()} on {server.capitalize()} at {fix_item_time(item.lastupdate)}'
-            embed = discord.Embed(title="", description=dsg, color=INFO_COLOR)
-            embed.set_author(name=item.name, url=f"https://classic.wowhead.com/item={item.id}", icon_url=item.icon)
-            msg = ""
-            for tag in item.tags:
-                msg = msg + f"{tag}\n"
-            if msg == "":
-                msg = "None"
-            embed.add_field(name=f"Tags:", value=msg)
-            embed.add_field(name=f"Item Level:", value=f"{item.level} ")
-            embed.add_field(name=f"Required Level:", value=f"{item.requiredlevel} ")
-            embed.add_field(name=f"Sell Price:", value=f"{convertprice(item.sellprice)} ")
-            embed.add_field(name=f"Vendor Price:", value=f"{convertprice(item.vendorprice)} ")
-            if isinstance(item.current_auctions, Number):
-                ica = f'**{item.current_auctions:,d}**'
-            else:
-                ica = f'Not Available'
-            if isinstance(item.current_quantity, Number):
-                icb = f'**{item.current_quantity:,d}**'
-            else:
-                icb = f'Not Available'
-            embed.add_field(name=f"Current Auctions/Prices:", value=f"Auctions: **{ica}**\nQuantity Available: **{icb}**\nMarket Value: **{convertprice(item.current_marketvalue)}**\nHistorical Value: **{convertprice(item.current_historicalvalue)}**\nMinimum Buyout: **{convertprice(item.current_minbuyout)}**", inline=False)
-            if isinstance(item.previous_auctions, Number):
-                ica = f'**{item.previous_auctions:,d}**'
-            else:
-                ica = f'Not Available'
-            if isinstance(item.previous_quantity, Number):
-                icb = f'**{item.previous_quantity:,d}**'
-            else:
-                icb = f'Not Available'
-            embed.add_field(name=f"Previous Auctions/Prices:", value=f"Auctions: **{ica}**\nQuantity Available: **{icb}**\nMarket Value: **{convertprice(item.previous_marketvalue)}**\nHistorical Value: **{convertprice(item.previous_historicalvalue)}**\nMinimum Buyout: **{convertprice(item.previous_minbuyout)}**", inline=False)
-            msg = ""
-            for val in filter_details(item.name, item.tags, item.tooltip):
-                msg = msg + f"{val}\n"
-            if msg != "":
-                embed.add_field(name=f"{item.name.title()} Details:", value=msg)
-            await respo.delete()
-            await messagesend(ctx, embed, allowgeneral=False, reject=True)
-        else:
-            if ires is None:
-                msg = f"Cannot locate information for item: {item.name.title()}"
-                embed = discord.Embed(description=msg, color=FAIL_COLOR)
-                await respo.delete()
-                await messagesend(ctx, embed, allowgeneral=False, reject=True)
-            elif not ires:
-                msg = f"Error retreiving information, please try again later."
-                embed = discord.Embed(description=msg, color=FAIL_COLOR)
-                await respo.delete()
-                await messagesend(ctx, embed, allowgeneral=False, reject=True)
-    else:
-        msg = f"You must specify a item name or item id to get prices for"
-        embed = discord.Embed(description=msg, color=FAIL_COLOR)
+async def setting(message, user, guildconfig, *args):
+    logcommand(message)
+    respo = await wait_message(message)
+    try:
+        if args:
+            if args[0] == "list" or args[0] == "show":
+                embed = discord.Embed(title="WoWInfoBot Settings", description=f'Discord Server Name: {user["guild_name"]}\nDiscord Server ID: {user["guild_id"]}', color=HELP_COLOR)
+                for sec, val in guildconfig._sections.items():
+                    msg = ''
+                    for key, value in val.items():
+                        if key != 'admin_role_id' and key != 'user_role_id':
+                            if key == 'api_key' or key == 'client_id' or key == 'client_secret':
+                                if value != 'None':
+                                    value = '***************'
+                            msg = msg + f'{key.title()}: **{value}**\n'
+                    embed.add_field(name=sec.capitalize(), value=msg, inline=False)
+                await messagesend(message, embed, allowgeneral=False, reject=True)
+
+            if args[0] == "timezone":
+                guildconfig.set('server', 'server_timezone', args[1])
+                await guildconfig.write()
+                await setting(message, user, guildconfig, 'list')
+
+            if args[0] == "guildname":
+                guildconfig.set('server', 'guild_name', args[1])
+                await guildconfig.write()
+                await setting(message, user, guildconfig, 'list')
+
+            if args[0] == "servername":
+                guildconfig.set('server', 'server_name', args[1])
+                await guildconfig.write()
+                await setting(message, user, guildconfig, 'list')
+
+            if args[0] == "faction":
+                if args[1].lower() == 'alliance' or args[1].lower() == 'horde':
+                    guildconfig.set('server', 'faction', args[1].capitalize())
+                    await guildconfig.write()
+                    await setting(message, user, guildconfig, 'list')
+                else:
+                    msg = f"Invalid faction, must be Alliance or Horde"
+                    embed = discord.Embed(description=msg, color=FAIL_COLOR)
+                    await messagesend(message, embed, allowgeneral=False, reject=True)
+
+            if args[0] == "prefix":
+                guildconfig.set('discord', 'command_prefix', args[1])
+                await guildconfig.write()
+                await setting(message, user, guildconfig, 'list')
+
+            if args[0] == "warcraftlogsapikey":
+                guildconfig.set('warcraftlogs', 'api_key', args[1])
+                await guildconfig.write()
+                await setting(message, user, guildconfig, 'list')
+
+            if args[0] == "blizzardapiclientid":
+                guildconfig.set('blizzard', 'client_id', args[1])
+                await guildconfig.write()
+                await setting(message, user, guildconfig, 'list')
+
+            if args[0] == "blizzardapiclientsecret":
+                guildconfig.set('blizzard', 'client_secret', args[1])
+                await guildconfig.write()
+                await setting(message, user, guildconfig, 'list')
+
+            if args[0] == "pmonly":
+                if args[1].lower() != 'on' and args[1].lower() != 'off' and args[1].lower() != 'false' and args[1].lower() != 'true':
+                    msg = "Invalid option, must be True/False or On/Off"
+                    embed = discord.Embed(description=msg, color=FAIL_COLOR)
+                    await messagesend(message, embed, allowgeneral=False, reject=True)
+                else:
+                    if args[1].lower() != 'on' or args[1].lower() != 'true':
+                        pm = True
+                    elif args[1].lower() != 'on' or args[1].lower() != 'true':
+                        pm = False
+                    guildconfig.set('discord', 'pm_only', pm)
+                    await guildconfig.write()
+                    await setting(message, 'list')
+    except:
+        log.exception(f'Exception in settings function')
         await respo.delete()
-        await messagesend(ctx, embed, allowgeneral=False, reject=True)
-
-
-@bot.command(name="setting", aliases=["set", "settings"])
-@commands.check(logcommand)
-async def setting(ctx, *args):
-    if args:
-        # Add settings logic ############
-        # configdata.set('bug_tracker', 'password', 'secret')
-        if not path.exists(configfile) or stat(configfile).st_size == 0:
-            with open(configfile, 'w') as cf:
-                configdata.write(cf)
-            log.info(f'New config written to file: {configfile}')
-        else:
-            log.error(f"Error writing config to: {configfile} File doesn't exist or is empty")
-            # Add embed response to config save error ############
-    else:
-        pass  # Add response to missing args  ############
-    msg = "Commands can be privately messaged directly to the bot or in channels"
-    embed = discord.Embed(title="WoW Info Classic Bot Commands:", description=msg, color=HELP_COLOR)
-    embed.add_field(name=f"**`{command_prefix}raids [optional instance name]`**", value=f"Last 5 raids for the guild, [MC,ONY,BWL,ZG,AQ20,AQ40]\nLeave instance name blank for all", inline=False)
-    embed.add_field(name=f"**`{command_prefix}info <character name>`**", value=f"Character information from last logged encounters", inline=False)
-    embed.add_field(name=f"**`{command_prefix}gear <character name>`**", value=f"Character gear from last logged encounters", inline=False)
-    embed.add_field(name=f"**`{command_prefix}price <item name>`**", value=f"Price and information for an item", inline=False)
-    embed.add_field(name=f"**`{command_prefix}item <item name>`**", value=f"Same as ?price", inline=False)
-    embed.add_field(name=f"**`{command_prefix}news`**", value=f"Latest World of Warcraft Classic News", inline=False)
-    await ctx.message.author.send(embed=embed)
-    if (type(ctx.message.channel) != discord.channel.DMChannel and str(ctx.message.channel) != "bot-channel"):
-        await ctx.message.delete()
+        await messagesend(message, error_embed(message), allowgeneral=True, reject=False)
 
 
 @bot.command(name="admin", aliases=["root"], pass_context=True)
 @commands.check(logcommand)
 #@commands.check(is_admin)
-async def admin(ctx, *args):
-    #pprint(ctx.guild.id)
-    #pprint(dir(ctx.message.author))
-    pprint(await user_info(ctx))
+async def admin(message, *args):
+    #pprint(message.guild.id)
+    #pprint(dir(message.message.author))
+    pprint(await user_info(message))
 
 '''
     if args:
@@ -793,31 +937,34 @@ async def admin(ctx, *args):
                 embed.add_field(name=f"{eguild.name}", value=msg)
             async for each in bot.fetch_guilds():
                 pprint(each)
-            await ctx.message.author.send(embed=embed)
+            await message.message.author.send(embed=embed)
         if args[0] == 'invite':
             msg = 'https://discord.com/oauth2/authorize?bot_id=750867600250241086&scope=bot&permissions=604302400'
             embed = discord.Embed(description=msg, color=HELP_COLOR)
-            await messagesend(ctx, embed, allowgeneral=False, reject=True)
-    else:
+            await messagesend(message, embed, allowgeneral=False, reject=True)
+    se:
         msg = f"You must specify an admin command"
         embed = discord.Embed(description=msg, color=FAIL_COLOR)
-        await messagesend(ctx, embed, allowgeneral=False, reject=True)
+        await messagesend(message, embed, allowgeneral=False, reject=True)
 '''
 
-@bot.command(name="help", aliases=["helpme", "commands"])
-@commands.check(logcommand)
-async def help(ctx):
+
+async def help(message, user, guildconfig, *args):
+    logcommand(message)
+    command_prefix = guildconfig.get("discord", "command_prefix")
     msg = "Commands can be privately messaged directly to the bot or in channels"
     embed = discord.Embed(title="WoW Info Classic Bot Commands:", description=msg, color=HELP_COLOR)
     embed.add_field(name=f"**`{command_prefix}raids [optional instance name]`**", value=f"Last 5 raids for the guild, [MC,ONY,BWL,ZG,AQ20,AQ40]\nLeave instance name blank for all", inline=False)
-    embed.add_field(name=f"**`{command_prefix}info <character name>`**", value=f"Character information from last logged encounters", inline=False)
+    embed.add_field(name=f"**`{command_prefix}player <character name>`**", value=f"Character information from last logged encounters", inline=False)
     embed.add_field(name=f"**`{command_prefix}gear <character name>`**", value=f"Character gear from last logged encounters", inline=False)
     embed.add_field(name=f"**`{command_prefix}price <item name>`**", value=f"Price and information for an item", inline=False)
-    embed.add_field(name=f"**`{command_prefix}item <item name>`**", value=f"Same as ?price", inline=False)
+    embed.add_field(name=f"**`{command_prefix}item <item name>`**", value=f"Same as price command", inline=False)
     embed.add_field(name=f"**`{command_prefix}news`**", value=f"Latest World of Warcraft Classic News", inline=False)
-    await ctx.message.author.send(embed=embed)
-    if (type(ctx.message.channel) != discord.channel.DMChannel and str(ctx.message.channel) != "bot-channel"):
-        await ctx.message.delete()
+    embed.add_field(name=f"**`{command_prefix}help`**", value=f"This help message", inline=False)
+    print(dir(message.author))
+    await message.author.send(embed=embed)
+    if (type(message.channel) != discord.channel.DMChannel and str(message.channel) != "bot-channel"):
+        await message.delete()
 
 
 def main():

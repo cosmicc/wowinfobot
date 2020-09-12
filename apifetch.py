@@ -1,5 +1,7 @@
 import asyncio
 from urllib import parse
+import json
+from http.client import responses
 
 import aiohttp
 from loguru import logger as log
@@ -26,14 +28,22 @@ class WarcraftLogsAPI:
             async with self.session.get(url, params=params, timeout=5) as response:
                 log.debug(f'WarcraftLogsAPI HTTP Response: {response.status}')
                 if response.status == 200:
-                    log.debug(f'WarcraftLogsAPI Returning JSON response')
                     return await response.json()
+                elif response.status == 401:
+                    log.warning(f'WarcraftLogsAPI Failed Request [{responses[response.status]}] api:{self.api_key} {url}')
+                    return json.loads(json.dumps([{'error': response.status}]))
+                elif response.status - 400 >= 0 and response.status - 400 < 100:
+                    log.warning(f'WarcraftLogsAPI client error [{response.status}] [{responses[response.status]}] {url}')
+                    return json.loads(json.dumps([{'error': response.status}]))
+                elif response.status - 500 >= 0 and response.status - 500 < 100:
+                    log.warning(f'WarcraftLogsAPI server error [{response.status}] [{responses[response.status]}] {url}')
+                    return json.loads(json.dumps([{'error': response.status}]))
                 else:
-                    log.error(f'WarcraftLogsAPI RETRIEVE ERROR! {url}')
-                    return False
+                    log.error(f'WarcraftLogsAPI UNKNOWN ERROR! [{response.status}] [{responses[response.status]}] {url}')
+                    return json.loads(json.dumps([{'error': response.status}]))
         except asyncio.exceptions.TimeoutError:
             log.error(f'WarcraftLogsAPI Timeout Error!')
-            return False
+            return json.loads(json.dumps([{'error': 'timeout'}]))
 
     async def guild(self, name, server, region, **params):
         path = "reports/guild/{}/{}/{}".format(name, server, region)
@@ -75,10 +85,19 @@ class NexusAPI:
             async with self.session.get(url, params=params, timeout=5) as response:
                 log.debug(f'NexusAPI HTTP Response: {response.status}')
                 if response.status == 200:
-                    log.debug(f'NexusAPI Returning JSON response')
                     return await response.json()
+                elif response.status == 401:
+                    log.warning(f'NexusAPI Failed Request [{responses[response.status]}] api:{self.api_key} {url}')
+                    return json.loads(json.dumps([{'error': response.status}]))
+                elif response.status - 400 >= 0 and response.status - 400 < 100:
+                    log.warning(f'NexusAPI client error [{response.status}] [{responses[response.status]}] {url}')
+                    return json.loads(json.dumps([{'error': response.status}]))
+                elif response.status - 500 >= 0 and response.status - 500 < 100:
+                    log.warning(f'NexusAPI server error [{response.status}] [{responses[response.status]}] {url}')
+                    return json.loads(json.dumps([{'error': response.status}]))
                 else:
-                    log.error(f'NexusAPI RETRIEVE ERROR! {url}')
+                    log.error(f'NexusAPI UNKNOWN ERROR! [{response.status}] [{responses[response.status]}] {url}')
+                    return json.loads(json.dumps([{'error': response.status}]))
         except asyncio.exceptions.TimeoutError:
             log.error(f'WarLogsAPI Timeout Error!')
             return False
