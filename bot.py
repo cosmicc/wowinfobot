@@ -68,12 +68,14 @@ bliz_int_secret = systemconfig.get("blizzard_api", "secret")
 wcl_url = systemconfig.get("warcraftlogs_api", "api_url")
 tsm_url = systemconfig.get("tsm_api", "api_url")
 
+consoleformat = "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green>| <level>{level: <8}</level> | <level>{message}</level> |<cyan>{function}</cyan>:<cyan>{line}</cyan>"
+logformat = "{time:YYYY-MM-DD HH:mm:ss.SSS}| {level: <8} | {message} |{function}:{line}"
 
 log.remove()
 
-log.add(sink=stdout, level=loglevel, colorize=True)
+log.add(sink=stdout, level=loglevel, format=consoleformat, colorize=True)
 
-log.add(sink=str(logfile), level=loglevel, buffering=1, enqueue=True, backtrace=True, diagnose=True, serialize=False, delay=False, colorize=False, rotation="5 MB", retention="1 month", compression="tar.gz")
+log.add(sink=str(logfile), level=loglevel, buffering=1, enqueue=True, backtrace=True, format=logformat, diagnose=True, serialize=False, delay=False, colorize=False, rotation="5 MB", retention="1 month", compression="tar.gz")
 
 log.debug(f'System configuration loaded successfully from {configfile}')
 log.debug(f'Logfile started: {logfile}')
