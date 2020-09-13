@@ -1,13 +1,11 @@
 #!/usr/bin/env python3.8
 import signal
-import traceback
 from configparser import ConfigParser
 from datetime import datetime
 from math import trunc
 from numbers import Number
 from os import _exit, path, stat
-from sys import exit
-from time import time
+from sys import exit, stdout
 
 import discord
 from discord.ext import commands
@@ -15,7 +13,7 @@ from loguru import logger as log
 from prettyprinter import pprint
 from pytz import timezone
 
-from apifetch import NexusAPI, WarcraftLogsAPI
+from apifetch import NexusAPI, WarcraftLogsAPI, BlizzardAPI
 from processlock import PLock
 from guildconfigparser import GuildConfigParser, RedisPool
 
@@ -25,7 +23,6 @@ signals = (0, 'SIGHUP', 'SIGINT', 'SIGQUIT', 4, 5, 6, 7, 8, 'SIGKILL', 10, 11, 1
 
 def signal_handler(signal, frame):
     log.warning(f'Termination signal [{signals[signal]}] caught. Closing web sessions...')
-    wclclient.close()
     tsmclient.close()
     log.info(f'Exiting.')
     exit(0)
@@ -65,14 +62,20 @@ redis_port = systemconfig.get("general", "redis_port")
 redis_db = systemconfig.get("general", "redis_db")
 command_prefix = systemconfig.get("discord", "command_prefix")
 discordkey = systemconfig.get("discord", "api_key")
-bliz_url = systemconfig.get("blizzard_api", "api_url")
+superadmin_id = systemconfig.get("discord", "superadmin_id")
+bliz_int_client = systemconfig.get("blizzard_api", "client_id")
+bliz_int_secret = systemconfig.get("blizzard_api", "secret")
 wcl_url = systemconfig.get("warcraftlogs_api", "api_url")
 tsm_url = systemconfig.get("tsm_api", "api_url")
 
+
+log.remove()
+
+log.add(sink=stdout, level=loglevel, colorize=True)
+
+log.add(sink=str(logfile), level=loglevel, buffering=1, enqueue=True, backtrace=True, diagnose=True, serialize=False, delay=False, colorize=False, rotation="5 MB", retention="1 month", compression="tar.gz")
+
 log.debug(f'System configuration loaded successfully from {configfile}')
-
-log.add(sink=str(logfile), level=loglevel, buffering=1, enqueue=True, backtrace=True, diagnose=True, serialize=False, delay=False, rotation="5       MB", retention="1 month", compression="tar.gz")
-
 log.debug(f'Logfile started: {logfile}')
 
 bot = commands.Bot(command_prefix=command_prefix, case_insensitive=True)
@@ -90,6 +93,9 @@ SUCCESS_COLOR = 0x00FF00
 FAIL_COLOR = 0xFF0000
 INFO_COLOR = 0x0088FF
 HELP_COLOR = 0xFF8800
+
+COMMAND_PREFIXES = {1: ["?", "Question Mark"], 2: [".", "Period"], 3: ["!", "Exclimation Point"], 4: ["#", "Pound"], 5: ["\\", "Backslash"], 6: ["%", "Percent"], 7: ["-", "Minus"], 8: ["$", "Dollar Sign"], 9: ["&", "Ampersand"], 10: ["*", "Asterisk"], 11: ["^", "Carat"], 12: [">", "Greater Than"]}
+
 GEAR_ORDER = {0: 'Head', 1: 'Neck', 2: 'Shoulders', 3: 'Shirt', 4: 'Chest', 5: 'Belt', 6: 'Legs', 7: 'Boots', 8: 'Bracers', 9: 'Hands', 10: 'Ring', 11: 'Ring', 12: 'Trinket', 13: 'Trinket', 14: 'Back', 15: 'Main Hand', 16: 'Off-Hand', 17: 'Ranged', 18: 'Tabard'}
 
 item_quality = {1: 'Common', 2: 'Uncommon', 3: 'Rare', 4: 'Epic', 5: 'Legendary', 6: 'Artifact'}
@@ -112,23 +118,32 @@ intervals = (
     ("seconds", 1),
 )
 
+running_setup = {}
 
-def epochtz(epoch, servertimezone):
-    fixedepoch = int(str(epoch)[:10])
-    date_obj = datetime.fromtimestamp(fixedepoch)
+
+def apply_timezone(date_obj, tz):
     date_obj = timezone('UTC').localize(date_obj)
-    date_obj = date_obj.astimezone(timezone(servertimezone))
-    tzepoch = date_obj.timestamp()
-    return (int(tzepoch))
+    return date_obj.astimezone(timezone(tz))
 
 
-def convert_time(dtime, servertimezone, timeonly=False, dateonly=False):
-    if timeonly:
-        return datetime.fromtimestamp(epochtz(dtime, servertimezone)).strftime('%-I:%M%p')
-    elif dateonly:
-        return datetime.fromtimestamp(epochtz(dtime, servertimezone)).strftime('%m/%d/%y')
+def _epoch_to_dto(epoch):
+    fixedepoch = int(str(epoch)[:10])
+    return datetime.fromtimestamp(fixedepoch)
+
+
+def convert_time(dtime, timeonly=False, dateonly=False, tz=None):
+    if isinstance(dtime, str) or isinstance(dtime, int):
+        date_obj = _epoch_to_dto(dtime)
     else:
-        return datetime.fromtimestamp(epochtz(dtime, servertimezone)).strftime('%m/%d/%y %-I:%M%p')
+        date_obj = dtime
+    if tz is not None:
+        date_obj = apply_timezone(date_obj, tz)
+    if timeonly:
+        return date_obj.strftime('%-I:%M%p')
+    elif dateonly:
+        return date_obj.strftime('%m/%d/%y')
+    else:
+        return date_obj.strftime('%m/%d/%y %-I:%M%p')
 
 
 def fix_item_time(rawtime, servertimezone):
@@ -158,6 +173,8 @@ def truncate_float(number, digits):
 
 def elapsedTime(start_time, stop_time, append=False):
     result = []
+    start_time = int(str(start_time)[:10])
+    stop_time = int(str(stop_time)[:10])
     if start_time > stop_time:
         seconds = int(start_time) - int(stop_time)
     else:
@@ -196,7 +213,6 @@ def convertprice(rawprice):
 
 
 async def user_info(message):
-    startt = time()
     if type(message.channel) == discord.channel.DMChannel:
         for guild in bot.guilds:
             member = discord.utils.get(guild.members, id=message.author.id)
@@ -208,15 +224,17 @@ async def user_info(message):
                 admin_id = guildconfig.get("discord", "admin_role_id")
                 user_id = guildconfig.get("discord", "user_role_id")
                 for role in member.roles:
-                    if role.id == admin_id:
+                    if str(role.id) == str(admin_id):
                         is_admin_role = True
-                    if role.id == user_id:
+                    if str(role.id) == str(user_id):
                         is_user_role = True
-                log.debug(f'func:user_info time: {startt-time()}')
-                return {'user_id': message.author.id, 'user_name': message.author.name, 'guild_id': guild.id, 'guild_name': guild.name, 'channel': 'DMChannel', 'is_member': True, 'is_user_role': is_user_role, 'is_admin_role': is_admin_role}
+                if str(message.author.id) == str(superadmin_id):
+                    is_superadmin = True
+                else:
+                    is_superadmin = False
+                return {'user_id': message.author.id, 'user_name': message.author.name, 'guild_id': guild.id, 'guild_name': guild.name, 'channel': 'DMChannel', 'is_member': True, 'is_user': is_user_role, 'is_admin': is_admin_role, 'is_superadmin': is_superadmin}
             else:
-                return {'user_id': message.author.id, 'user_name': message.author.name, 'guild_id': None, 'guild_name': None, 'channel': 'DMChannel', 'is_member': False, 'is_user_role': False, 'is_admin_role': False}
-
+                return {'user_id': message.author.id, 'user_name': message.author.name, 'guild_id': None, 'guild_name': None, 'channel': 'DMChannel', 'is_member': False, 'is_user': False, 'is_admin': False, 'is_superadmin': is_superadmin}
     else:
         is_admin_role = False
         is_user_role = False
@@ -226,43 +244,15 @@ async def user_info(message):
         user_id = guildconfig.get("discord", "user_role_id")
         member = discord.utils.get(message.author.guild.members, id=message.author.id)
         for role in member.roles:
-            if role.id == admin_id:
+            if str(role.id) == str(admin_id):
                 is_admin_role = True
-            if role.id == user_id:
+            if str(role.id) == str(user_id):
                 is_user_role = True
-        return {'user_id': message.author.id, 'user_name': message.author.name, 'guild_id': message.author.guild.id, 'guild_name': message.author.guild.name, 'channel': message.channel.id, 'is_member': True, 'is_user_role': is_user_role, 'is_admin_role': is_admin_role}
-
-
-async def is_admin(message):
-    admin = False
-    memcount = 0
-    if type(message.message.channel) == discord.channel.DMChannel:
-        for guild in bot.guilds:
-            if discord.utils.get(guild.members, id=message.author.id):
-                memcount = memcount + 1
-                pprint(guild.roles)
-                if discord.utils.get(guild.roles, id=644205730395586570):
-                    admin = True
-                # print(discord.utils.get(guild.members, id=message.author.id))
-
-            # the member is in the server, do something #
+            if str(message.author.id) == str(superadmin_id):
+                is_superadmin = True
             else:
-                # the member is not in the server, do something #
-                pass
-        if memcount != 1:
-            log.warning(f'PM admin [message.author.name] auth failed (Found on {memcount} Servers)')
-            # PM to tell them they are admins on multiple servers
-            return False
-        else:
-            if admin:
-                return True
-            else:
-                return False
-    else:
-        if message.member.roles.has(644205730395586570):
-            return True
-        else:
-            return False
+                is_superadmin = False
+        return {'user_id': message.author.id, 'user_name': message.author.name, 'guild_id': message.author.guild.id, 'guild_name': message.author.guild.name, 'channel': message.channel.id, 'is_member': True, 'is_user': is_user_role, 'is_admin': is_admin_role, 'is_superadmin': is_superadmin}
 
 
 def filter_details(name, tags, labels):
@@ -328,24 +318,24 @@ class Item:
                 self.previous_auctions = itemdata['stats']['previous']['numAuctions']
                 self.previous_quantity = itemdata['stats']['previous']['quantity']
                 self.tooltip = itemdata['tooltip']
-            return True
+            return itemdata
 
 
 class Player:
 
     async def filter_last_encounters(self, npl):
         for entry in npl:
-            if epochtz(entry['startTime'], self.timezone) > min(self.edl):
+            if entry['startTime'] > min(self.edl):
                 if entry['reportID'] in self.tpl:
                     if self.tpl[entry["reportID"]] in self.edl:
                         del self.edl[self.tpl[entry["reportID"]]]
                     if entry["reportID"] in self.tpl:
                         del self.tpl[entry["reportID"]]
-                    self.edl.update({epochtz(entry["startTime"], self.timezone): entry})
-                    self.tpl.update({entry["reportID"]: epochtz(entry["startTime"], self.timezone)})
+                    self.edl.update({entry["startTime"]: entry})
+                    self.tpl.update({entry["reportID"]: entry["startTime"]})
                 else:
-                    self.edl.update({epochtz(entry["startTime"], self.timezone): entry})
-                    self.tpl.update({entry["reportID"]: epochtz(entry["startTime"], self.timezone)})
+                    self.edl.update({entry["startTime"]: entry})
+                    self.tpl.update({entry["reportID"]: entry["startTime"]})
                     if len(self.edl) > 5:
                         del self.edl[min(self.edl)]
 
@@ -376,21 +366,22 @@ class Player:
     async def fetch(self):
         for kkey, vval in RZONE.items():
             parselist = await self.client.parses(self.playername, self.guildconfig.get("server", "server_name").title(), self.guildconfig.get("server", "server_region").upper(), zone=kkey)
-            if len(parselist) != 0 and 'error' not in parselist:
-                self.totalencounters = self.totalencounters + len(parselist)
-                if kkey == 1000:
-                    self.mccount = self.mccount + len(parselist)
-                elif kkey == 1001:
-                    self.onycount = self.onycount + len(parselist)
-                elif kkey == 1002:
-                    self.bwlcount = self.bwlcount + len(parselist)
-                elif kkey == 1003:
-                    self.zgcount = self.zgcount + len(parselist)
-                elif kkey == 1004:
-                    self.aq20count = self.aq20count + len(parselist)
-                elif kkey == 1005:
-                    self.aq40count = self.aq40count + len(parselist)
-                await self.filter_last_encounters(parselist)
+            if await checkhttperrors(None, None, None, None, parselist):
+                if len(parselist) != 0 and 'error' not in parselist:
+                    self.totalencounters = self.totalencounters + len(parselist)
+                    if kkey == 1000:
+                        self.mccount = self.mccount + len(parselist)
+                    elif kkey == 1001:
+                        self.onycount = self.onycount + len(parselist)
+                    elif kkey == 1002:
+                        self.bwlcount = self.bwlcount + len(parselist)
+                    elif kkey == 1003:
+                        self.zgcount = self.zgcount + len(parselist)
+                    elif kkey == 1004:
+                        self.aq20count = self.aq20count + len(parselist)
+                    elif kkey == 1005:
+                        self.aq40count = self.aq40count + len(parselist)
+                    await self.filter_last_encounters(parselist)
         if self.totalencounters > 0:
             self.exists = True
             self.lastencounters = sorted(self.edl.items())
@@ -404,6 +395,7 @@ class Player:
                         else:
                             self.playerrole = encounter[1]['spec']
                     reporttable = await self.client.tables('casts', encounter[1]['reportID'], start=0, end=18000)
+
                     for entry in reporttable['entries']:
                         if entry['name'] == self.playername:
                             if 'spec' in entry and self.playerspec == "Not Available":
@@ -425,9 +417,7 @@ class Player:
                                         self.gearlist = entry['gear']
                                         self.geardate = convert_time(encounter[1]['startTime'], self.timezone, dateonly=True)
             self.lastencounter = self.lastencounters[len(self.lastencounters) - 1][1]
-            return True
-        else:
-            return None
+        return parselist
 
 
 @bot.event
@@ -458,136 +448,204 @@ async def fight_data(wclclient, fid):
     return kills, wipes, size, lastboss
 
 
-def logcommand(message):
+def logcommand(message, user):
     if type(message.channel) == discord.channel.DMChannel:
         dchan = "Direct Message"
     else:
         dchan = message.channel
-    log.log("INFO", f"Responding to [{message.content}] request from [{message.author}] in [#{dchan}]")
-    return True
+    log.log("INFO", f"Request [{message.content}] from [{message.author}] in [#{dchan}] from [{user['guild_name']}]")
 
 
-async def wait_message(message):
-    embed = discord.Embed(description="Please wait, fetching information...", color=INFO_COLOR)
-    return await messagesend(message, embed, allowgeneral=True, reject=False)
+async def wait_message(message, user, guildconfig):
+    #pprint(dir(message.channel))
+    await message.channel.trigger_typing()
+    return None
+    #if guildconfig.get('discord', 'pm_only') == "True" or (guildconfig.get('discord', 'limit_to_channel') != "Any" and str(message.channel.id) != guildconfig.get('discord', 'limit_to_channel_id')):
+    #    if type(message.channel) == discord.channel.DMChannel:
+    #        embed = discord.Embed(description="Please wait, fetching information...", color=INFO_COLOR)
+    #        return await messagesend(message, embed, user, guildconfig)
+    #    else:
+    #        return None
+    #else:
+    #    embed = discord.Embed(description="Please wait, fetching information...", color=INFO_COLOR)
+    #    return await messagesend(message, embed, user, guildconfig)
 
 
 def error_embed(message):
     return discord.Embed(description="Resource unavailable, please try again later.", color=FAIL_COLOR)
 
 
-async def messagesend(message, embed, allowgeneral=False, reject=True, adminonly=False, rootonly=False):
+async def messagesend(message, embed, user, guildconfig, respo=None):
     try:
+        if respo is not None:
+            await respo.delete()
         if type(message.channel) == discord.channel.DMChannel:
             return await message.author.send(embed=embed)
-        # elif str(message.message.channel) != "bot-channel" or (not allowgeneral and str(message.message.channel) == "general"):
-        # role = str(discord.utils.get(message.message.author.roles, name="admin"))
-            # if role != "admin":
-            #    await message.message.delete()
-            # if reject and role != "admin":
-            #    rejectembed = discord.Embed(description=rejectmsg, color=HELP_COLOR)
-            #    return await message.message.author.send(embed=rejectembed)
-            # elif role != "admin":
-            #    return await message.message.author.send(embed=embed)
-            # else:
-        #    return await message.message.channel.send(embed=embed)
+        elif guildconfig.get('discord', 'pm_only') == "True" or (guildconfig.get('discord', 'limit_to_channel') != "Any" and str(message.channel.id) != guildconfig.get('discord', 'limit_to_channel_id')):
+            await message.delete()
+            return await message.author.send(embed=embed)
         else:
             return await message.channel.send(embed=embed)
     except:
         log.exception("Critical error in message send")
 
 
-async def checkhttperrors(message, respo, checkdata):
-    if 'error' in checkdata[0]:
-        if checkdata[0]['error'] == 401:
+async def checkhttperrors(message, user, guildconfig, respo, checkdata):
+    if isinstance(checkdata, dict):
+        newcheck = checkdata
+    elif isinstance(checkdata, list):
+        if len(checkdata) > 0:
+            newcheck = checkdata[0]
+        else:
+            return True
+    else:
+        if message is not None:
+            log.error(f'Wrong type to check in checkhttperrors type: {type(checkdata)}')
+            embed = discord.Embed(description="Resource unavailable, please try again later.", color=FAIL_COLOR)
+            await messagesend(message, embed, user, guildconfig, respo=respo)
+        return False
+    if 'error' in newcheck:
+        if newcheck['error'] == 401:
             embed = discord.Embed(description="API key invalid. Check settings.", color=FAIL_COLOR)
         else:
             embed = discord.Embed(description="Resource unavailable, please try again later.", color=FAIL_COLOR)
-        await respo.delete()
-        await messagesend(message, embed, allowgeneral=True, reject=False)
+        if message is not None:
+            await messagesend(message, embed, user, guildconfig, respo=respo)
         return False
     else:
         return True
 
 
 @bot.event
-async def on_error(event, *args, **kwargs):
-    message = args[0]
-    log.error(traceback.format_exc())
-    await bot.send_message(message.channel, "error")
-
-
-@bot.event
 async def on_message(message):
-    if message.author.id != 750867600250241086:
+    if message.author.id != bot.user.id:
         user = await user_info(message)
         if user['guild_id'] is None:
             pass
         else:
             guildconfig = GuildConfigParser(redis, user['guild_id'])
             await guildconfig.read()
-            if message.content.startswith(guildconfig.get('discord', 'command_prefix')):
-                args = message.content[1:].split(' ')
-                if args[0].lower() in ['raids', 'last', 'lastraids', 'lastraid']:
-                    args.pop(0)
-                    await lastraids(message, user, guildconfig, *args)
-                elif args[0].lower() in ["news", "wownews", "warcraftnews"]:
-                    args.pop(0)
-                    await news(message, user, guildconfig, *args)
-                elif args[0].lower() in ["help", "commands", "helpme"]:
-                    args.pop(0)
-                    await help(message, user, guildconfig, *args)
-                elif args[0].lower() in ["setting", "set", "settings"]:
-                    args.pop(0)
-                    await setting(message, user, guildconfig, *args)
-                elif args[0].lower() in ["player", "playerinfo", "pinfo"]:
-                    args.pop(0)
-                    await info(message, user, guildconfig, *args)
-                elif args[0].lower() in ["gear", "playergear", "playeritems"]:
-                    args.pop(0)
-                    await gear(message, user, guildconfig, *args)
-                elif args[0].lower() in ["item", "price", "itemprice", "iinfo"]:
-                    args.pop(0)
-                    await item(message, user, guildconfig, *args)
+            if user['user_id'] in running_setup:
+                if message.content.lower() == 'cancel':
+                    title = 'Setup wizard has been cancelled'
+                    msg = f'Type {guildconfig.get("discord", "command_prefix")}setup in the future to run the setup wizard again'
+                    embed = discord.Embed(title=title, description=msg, color=FAIL_COLOR)
+                    del running_setup[user['user_id']]
+                    await messagesend(message, embed, user, guildconfig)
+                elif running_setup[user['user_id']]['setupstep'] == 1:
+                    await response1(message, user, guildconfig)
+                elif running_setup[user['user_id']]['setupstep'] == 2:
+                    await response2(message, user, guildconfig)
+                elif running_setup[user['user_id']]['setupstep'] == 3:
+                    await response3(message, user, guildconfig)
+                elif running_setup[user['user_id']]['setupstep'] == 4:
+                    await response4(message, user, guildconfig)
+                elif running_setup[user['user_id']]['setupstep'] == 5:
+                    await response5(message, user, guildconfig)
+                elif running_setup[user['user_id']]['setupstep'] == 6:
+                    await response6(message, user, guildconfig)
+                elif running_setup[user['user_id']]['setupstep'] == 7:
+                    await response7(message, user, guildconfig)
+                elif running_setup[user['user_id']]['setupstep'] == 8:
+                    await response8(message, user, guildconfig)
+                elif running_setup[user['user_id']]['setupstep'] == 9:
+                    await response9(message, user, guildconfig)
+                elif running_setup[user['user_id']]['setupstep'] == 10:
+                    await response10(message, user, guildconfig)
+                elif running_setup[user['user_id']]['setupstep'] == 11:
+                    await response11(message, user, guildconfig)
+                elif running_setup[user['user_id']]['setupstep'] == 12:
+                    await response12(message, user, guildconfig)
+                elif running_setup[user['user_id']]['setupstep'] == 13:
+                    await response13(message, user, guildconfig)
+            elif guildconfig.get("discord", "setupran") == "False" and type(message.channel) == discord.channel.DMChannel and message.content == "setup":
+                await setup(message, user, guildconfig)
+            elif guildconfig.get("discord", "setupran") == "False" and type(message.channel) == discord.channel.DMChannel:
+                    title = 'Bot has not been setup!'
+                    msg = f'Type "setup" to run the setup wizard.'
+                    embed = discord.Embed(title=title, description=msg, color=FAIL_COLOR)
+                    await messagesend(message, embed, user, guildconfig)
             else:
-                if type(message.channel) == discord.channel.DMChannel:
-                    await help(message, user, guildconfig)
+                if message.content.startswith(guildconfig.get('discord', 'command_prefix')):
+                    if user['is_user'] or user['is_admin']:
+                        args = message.content[1:].split(' ')
+                        if args[0].lower() in ['raids', 'last', 'lastraids', 'lastraid']:
+                            args.pop(0)
+                            await lastraids(message, user, guildconfig, *args)
+                        elif args[0].lower() in ["news", "wownews", "warcraftnews"]:
+                            args.pop(0)
+                            await news(message, user, guildconfig, *args)
+                        elif args[0].lower() in ["help", "commands", "helpme"]:
+                            args.pop(0)
+                            await help(message, user, guildconfig, *args)
+                        elif args[0].lower() == "settings" and type(message.channel) == discord.channel.DMChannel and user['is_admin']:
+                            args.pop(0)
+                            await setting(message, user, guildconfig, *args)
+                        elif args[0].lower() in ["player", "playerinfo", "pinfo"]:
+                            args.pop(0)
+                            await playerinfo(message, user, guildconfig, *args)
+                        elif args[0].lower() in ["gear", "playergear", "playeritems"]:
+                            args.pop(0)
+                            await playergear(message, user, guildconfig, *args)
+                        elif args[0].lower() in ["item", "price", "itemprice", "iteminfo"]:
+                            args.pop(0)
+                            await item(message, user, guildconfig, *args)
+                        elif args[0].lower() in ["server", "status", "serverstatus"]:
+                            args.pop(0)
+                            await status(message, user, guildconfig, *args)
+                        elif args[0].lower() in ["admin"] and type(message.channel) == discord.channel.DMChannel and user['is_superadmin']:
+                            args.pop(0)
+                            await admin(message, user, guildconfig, *args)
+                        elif args[0].lower() in ["setup"] and type(message.channel) == discord.channel.DMChannel and user['is_admin']:
+                            args.pop(0)
+                            await setup(message, user, guildconfig, *args)
+                        elif args[0].lower() in ["test"] and user['is_admin']:
+                            args.pop(0)
+                            await test(message, user, guildconfig, *args)
+                else:
+                    if type(message.channel) == discord.channel.DMChannel:
+                        await help(message, user, guildconfig)
 
 
-
-'''
-@bot.event
-async def on_command_error(message, error):
+async def status(message, user, guildconfig, *args):
+    logcommand(message, user)
+    respo = await wait_message(message, user, guildconfig)
     try:
-        if isinstance(error, commands.CommandNotFound):
-            log.warning(f"Invalid command [{message.message.content}] sent from [{message.message.author}]")
-            msg = f"Command **`{message.message.content}`** does not exist.  **`{command_prefix}help`** for a list and description of all the commands."
-            embed = discord.Embed(description=msg, color=FAIL_COLOR)
-            await messagesend(message, embed, allowgeneral=False, reject=False)
-        elif isinstance(error, commands.CheckFailure):
-            log.warning(f"discord check failed: {error}")
-            embed = discord.Embed(description="**An error has occurred, contact Arbin.**", color=FAIL_COLOR)
-            # await messagesend(message, embed, allowgeneral=True, reject=False)
-        else:
-            log.exception(f"discord bot error for {message.message.author}: {message.message.content} - {error}")
-            embed = discord.Embed(description="**An error has occurred, contact Arbin.**", color=FAIL_COLOR)
-            # await messagesend(message, embed, allowgeneral=True, reject=False)
+        blizcli = BlizzardAPI(guildconfig.get("blizzard", "client_id"), guildconfig.get("blizzard", "client_secret"), guildconfig.get("server", "server_region"))
+        await blizcli.authorize()
+        serverstatus = await blizcli.realm_status(guildconfig.get("server", "server_id"))
+        await blizcli.close()
+        if await checkhttperrors(message, user, guildconfig, respo, serverstatus):
+            embed = discord.Embed(title=f'{guildconfig.get("server", "server_name").title()} Server Status', color=INFO_COLOR)
+            embed.add_field(name='Status', value=serverstatus["status"]["name"]["en_US"])
+            if serverstatus["has_queue"]:
+                hasqueue = "Yes"
+            else:
+                hasqueue = "No"
+            embed.add_field(name='Queue', value=hasqueue)
+            embed.add_field(name='Population', value=serverstatus["population"]["name"]["en_US"])
+            embed.add_field(name='Type', value=guildconfig.get('server', 'server_type'))
+            embed.add_field(name='Category', value=guildconfig.get('server', 'server_category'))
+            embed.add_field(name='Region', value=guildconfig.get('server', 'server_region_name'), inline=False)
+            embed.add_field(name='Timezone', value=guildconfig.get('server', 'server_timezone'), inline=False)
+            await messagesend(message, embed, user, guildconfig, respo=respo)
     except:
-        log.exception("command error: ")
-'''
+        log.exception('Exception in status function')
+        await messagesend(message, error_embed(message), user, guildconfig, respo=respo)
 
 
 async def lastraids(message, user, guildconfig, *args):
-    logcommand(message)
-    respo = await wait_message(message)
+    logcommand(message, user)
+    respo = await wait_message(message, user, guildconfig)
     try:
         wclclient = WarcraftLogsAPI(wcl_url, guildconfig.get('warcraftlogs', 'api_key'))
-        servertimezone = guildconfig.get('server', 'server_timezone')
+        tz = guildconfig.get('server', 'server_timezone')
         enclist = await wclclient.guild(user['guild_name'], guildconfig.get('server', 'server_name'), guildconfig.get('server', 'server_region'))
-        if await checkhttperrors(message, respo, enclist):
+        if await checkhttperrors(message, user, guildconfig, respo, enclist):
             a = 1
             nzone = 0
             tt = 0
+            cont = True
             if args:
                 if args[0].lower() == "mc":
                     nzone = 1000
@@ -615,356 +673,735 @@ async def lastraids(message, user, guildconfig, *args):
                         nzone = 1005
                         tt = RZONE[nzone]
                 else:
-                    await respo.delete()
-                    await message.send(f"Invalid instance {args[0]}")
-            if tt == 0:
-                tttitle = f"Last 5 Logged Raids for {user['guild_name']}"
-            else:
-                tttitle = f"Last 5 Logged {tt} Raids for {user['guild_name']}"
-            embed = discord.Embed(title=tttitle, color=INFO_COLOR)
-            for each in enclist:
-                if (each['zone'] == nzone or nzone == 0) and (a <= 5):
-                    kills, wipes, size, lastboss = await fight_data(wclclient, each['id'])
-                    embed.add_field(name=f"{RZONE[each['zone']]} - {convert_time(each['start'], servertimezone, dateonly=True)} ({each['title']})", value=f"{convert_time (each['start'], servertimezone, timeonly=True)}-{convert_time(each['end'], servertimezone, timeonly=True)} - {elapsedTime(epochtz(each['start'], servertimezone), epochtz(each['end'], servertimezone))}\n[Bosses Killed: ({kills}\{BZONE[each['zone']]}) with {wipes} Wipes - Last Boss: {lastboss}](https://classic.warcraftlogs.com/reports/{each['id']})", inline=False)
-                    a = a + 1
-            if a == 1:
-                embed = discord.Embed(description=f"No raids were found for {guildconfig.get('server', 'guild_name').title()} on {[guildconfig.get('server', 'server_name').title()]}", color=FAIL_COLOR)
-            await wclclient.close()
-            await respo.delete()
-            await messagesend(message, embed, allowgeneral=True, reject=False)
+                    embed = discord.Embed(description=f"Invalid instance {args[0]}", color=FAIL_COLOR)
+                    await wclclient.close()
+                    await messagesend(message, embed, user, guildconfig, respo=respo)
+                    cont = False
+            if cont:
+                if tt == 0:
+                    tttitle = f"Last 5 Logged Raids for {user['guild_name']}"
+                else:
+                    tttitle = f"Last 5 Logged {tt} Raids for {user['guild_name']}"
+                embed = discord.Embed(title=tttitle, color=INFO_COLOR)
+                for each in enclist:
+                    if (each['zone'] == nzone or nzone == 0) and (a <= 5):
+                        kills, wipes, size, lastboss = await fight_data(wclclient, each['id'])
+                        rtstart = convert_time(each['start'], timeonly=True, tz=tz)
+                        rtstop = convert_time(each['end'], timeonly=True, tz=tz)
+                        embed.add_field(name=f"{RZONE[each['zone']]} - {convert_time(each['start'], dateonly=True, tz=tz)} ({each['title']})", value=f"{rtstart}-{rtstop} - {elapsedTime(each['start'], each['end'])}\n[Bosses Killed: ({kills}\{BZONE[each['zone']]}) with {wipes} Wipes - Last Boss: {lastboss}](https://classic.warcraftlogs.com/reports/{each['id']})", inline=False)
+                        a = a + 1
+                if a == 1:
+                    embed = discord.Embed(description=f"No raids were found for {guildconfig.get('server', 'guild_name').title()} on {[guildconfig.get('server', 'server_name').title()]}", color=FAIL_COLOR)
+                await wclclient.close()
+                await messagesend(message, embed, user, guildconfig, respo=respo)
     except:
         log.exception('Exception in lastraids function')
         await wclclient.close()
-        await respo.delete()
-        await messagesend(message, error_embed(message), allowgeneral=True, reject=False)
+        await messagesend(message, error_embed(message), user, guildconfig, respo=respo)
 
 
 async def news(message, user, guildconfig, *args):
-    logcommand(message)
-    respo = await wait_message(message)
+    logcommand(message, user)
+    respo = await wait_message(message, user, guildconfig)
     try:
         news = await tsmclient.news()
-        if await checkhttperrors(message, respo, news):
+        if await checkhttperrors(message, user, guildconfig, respo, news):
             embed = discord.Embed(title=f'World of Warcraft Classic News', color=INFO_COLOR)
             for each in news:
                 embed.add_field(name=f"**{each['title']}**", value=f"{fix_news_time(each['pubDate'], guildconfig.get('server','server_timezone'))}\n[{each['content']}]({each['link']})", inline=False)
             await respo.delete()
-            await messagesend(message, embed, allowgeneral=True, reject=False)
+            await messagesend(message, embed, user, guildconfig)
     except:
         log.exception('Exception in news function')
-        await respo.delete()
-        await messagesend(message, error_embed(message), allowgeneral=True, reject=False)
+        await messagesend(message, error_embed(message), user, guildconfig, respo=respo)
 
 
-async def info(message, user, guildconfig, *args):
-    logcommand(message)
-    respo = await wait_message(message)
+async def playerinfo(message, user, guildconfig, *args):
+    logcommand(message, user)
+    respo = await wait_message(message, user, guildconfig)
     try:
         if args:
             servertimezone = guildconfig.get('server', 'server_timezone')
             wclclient = WarcraftLogsAPI(wcl_url, guildconfig.get('warcraftlogs', 'api_key'))
             player = Player(guildconfig, wclclient, args[0])
-            await player.fetch()
+            pp = await player.fetch()
             await wclclient.close()
-            if player.exists:
-                embed = discord.Embed(title=f'{args[0].capitalize()} on {guildconfig.get("server", "server_region".upper())}-{guildconfig.get("server", "server_name").title()}', color=INFO_COLOR)
-                # embed.set_author(name=args[0].capitalize())
-                embed.add_field(name=f"Class:", value=f"{player.playerclass}")
-                embed.add_field(name=f"Spec:", value=f"{player.playerspec}")
-                embed.add_field(name=f"Role:", value=f"{player.playerrole}")
-                # embed.add_field(name=f"Gear Enchants:", value=f"{}")
-                # embed.add_field(name=f"Avg Item Level for fight:", value=f"{")
-                # embed.add_field(name=f"Last Fight Percentile:", value=f"{truncate_float(perc, 1)}%")
-                # embed.add_field(name=f"Last Fight Rank:", value="{:,} of {:,}".format(rank, outof))
-                embed.add_field(name=f"Encounters Logged:", value=f"{player.totalencounters}")
-                embed.add_field(name=f"MC Bosses Logged:", value=f"{player.mccount}")
-                embed.add_field(name=f"Ony Raids Logged:", value=f"{player.onycount}")
-                embed.add_field(name=f"BWL Bosses Logged:", value=f"{player.bwlcount}")
-                embed.add_field(name=f"ZG Bosses Logged:", value=f"{player.zgcount}")
-                embed.add_field(name=f"AQ20 Bosses Logged:", value=f"{player.aq20count}")
-                embed.add_field(name=f"AQ40 Bosses Logged:", value=f"{player.aq40count}")
-                elen = len(player.lastencounters) - 1
-                msg = ""
-                while elen >= 0:
-                    if player.lastencounters[elen][1] != 0:
-                        msg = msg + f"{convert_time(player.lastencounters[elen][1]['startTime'], servertimezone, dateonly=True)}  [{RZONE[BOSSREF[player.lastencounters[elen][1]['encounterName']]]}](https://classic.warcraftlogs.com/reports/{player.lastencounters[elen][1]['reportID']}) Last Boss: {player.lastencounters[elen][1]['encounterName']}\n"
-                    elen = elen - 1
-                embed.add_field(name="Last 5 Raids Logged:", value=msg, inline=False)
-                await respo.delete()
-                await messagesend(message, embed, allowgeneral=True, reject=False)
-            else:
-                msg = "Cannot find character {} in warcraft logs".format(player.playername)
-                embed = discord.Embed(description=msg, color=FAIL_COLOR)
-                await respo.delete()
-                await messagesend(message, embed, allowgeneral=True, reject=False)
+            if await checkhttperrors(message, user, guildconfig, respo, pp):
+                if player.exists:
+                    embed = discord.Embed(title=f'{args[0].capitalize()} on {guildconfig.get("server", "server_region".upper())}-{guildconfig.get("server", "server_name").title()}', color=INFO_COLOR)
+                    # embed.set_author(name=args[0].capitalize())
+                    embed.add_field(name=f"Class:", value=f"{player.playerclass}")
+                    embed.add_field(name=f"Spec:", value=f"{player.playerspec}")
+                    embed.add_field(name=f"Role:", value=f"{player.playerrole}")
+                    # embed.add_field(name=f"Gear Enchants:", value=f"{}")
+                    # embed.add_field(name=f"Avg Item Level for fight:", value=f"{")
+                    # embed.add_field(name=f"Last Fight Percentile:", value=f"{truncate_float(perc, 1)}%")
+                    # embed.add_field(name=f"Last Fight Rank:", value="{:,} of {:,}".format(rank, outof))
+                    embed.add_field(name=f"Encounters Logged:", value=f"{player.totalencounters}")
+                    embed.add_field(name=f"MC Bosses Logged:", value=f"{player.mccount}")
+                    embed.add_field(name=f"Ony Raids Logged:", value=f"{player.onycount}")
+                    embed.add_field(name=f"BWL Bosses Logged:", value=f"{player.bwlcount}")
+                    embed.add_field(name=f"ZG Bosses Logged:", value=f"{player.zgcount}")
+                    embed.add_field(name=f"AQ20 Bosses Logged:", value=f"{player.aq20count}")
+                    embed.add_field(name=f"AQ40 Bosses Logged:", value=f"{player.aq40count}")
+                    elen = len(player.lastencounters) - 1
+                    msg = ""
+                    while elen >= 0:
+                        if player.lastencounters[elen][1] != 0:
+                            msg = msg + f"{convert_time(player.lastencounters[elen][1]['startTime'], dateonly=True, tz=servertimezone)}  [{RZONE[BOSSREF[player.lastencounters[elen][1]['encounterName']]]}](https://classic.warcraftlogs.com/reports/{player.lastencounters[elen][1]['reportID']}) Last Boss: {player.lastencounters[elen][1]['encounterName']}\n"
+                        elen = elen - 1
+                    embed.add_field(name="Last 5 Raids Logged:", value=msg, inline=False)
+                    await messagesend(message, embed, user, guildconfig, respo=respo)
+                else:
+                    msg = "Cannot find character {} in warcraft logs".format(player.playername)
+                    embed = discord.Embed(description=msg, color=FAIL_COLOR)
+                    await messagesend(message, embed, user, guildconfig, respo=respo)
         else:
             msg = f"You must specify a game character to get info for"
             embed = discord.Embed(description=msg, color=FAIL_COLOR)
-            await messagesend(message, embed, allowgeneral=True, reject=False)
+            await messagesend(message, embed, user, guildconfig, respo=respo)
     except:
         log.exception(f'Exception in player info function')
-        await respo.delete()
-        await messagesend(message, error_embed(message), allowgeneral=True, reject=False)
+        await messagesend(message, error_embed(message), user, guildconfig, respo=respo)
 
 
-async def gear(message, user, guildconfig, *args):
-    logcommand(message)
-    respo = await wait_message(message)
+async def playergear(message, user, guildconfig, *args):
+    logcommand(message, user)
+    respo = await wait_message(message, user, guildconfig)
     playername = args[0]
     try:
         if args:
             wclclient = WarcraftLogsAPI(wcl_url, guildconfig.get('warcraftlogs', 'api_key'))
             player = Player(guildconfig, wclclient, playername)
-            await player.fetch()
+            pp = await player.fetch()
             await wclclient.close()
-            # Addfail check like items #####################
-            if player.exists:
-                embed = discord.Embed(title=f"{args[0].capitalize()}'s gear from {player.geardate}", color=INFO_COLOR)
-                for item in player.gearlist:
-                    if 'name' in item and item['slot'] != 3:
-                        if 'itemLevel' in item:
-                            il = f"({item['itemLevel']})"
-                        else:
-                            il = ""
-                        if 'permanentEnchantName' in item:
-                            en = f"{item['permanentEnchantName']}"
-                        else:
-                            en = ""
-                        if 'id' in item:
-                            iid = item['id']
-                        else:
-                            iid = ""
-                        embed.add_field(name=f"{GEAR_ORDER[item['slot']]}:", value=f"**[{item['name']}](https://classic.wowhead.com/item={iid}) {il}**\n{en}", inline=True)
-                await respo.delete()
-                await messagesend(message, embed, allowgeneral=True, reject=False)
-            else:
-                msg = "Cannot find character {} in warcraft logs".format(player.playername)
-                embed = discord.Embed(description=msg, color=FAIL_COLOR)
-                await respo.delete()
-                await messagesend(message, embed, allowgeneral=True, reject=False)
+            if await checkhttperrors(message, user, guildconfig, respo, pp):
+                if player.exists:
+                    embed = discord.Embed(title=f"{args[0].capitalize()}'s gear from {player.geardate}", color=INFO_COLOR)
+                    for item in player.gearlist:
+                        if 'name' in item and item['slot'] != 3:
+                            if 'itemLevel' in item:
+                                il = f"({item['itemLevel']})"
+                            else:
+                                il = ""
+                            if 'permanentEnchantName' in item:
+                                en = f"{item['permanentEnchantName']}"
+                            else:
+                                en = ""
+                            if 'id' in item:
+                                iid = item['id']
+                            else:
+                                iid = ""
+                            embed.add_field(name=f"{GEAR_ORDER[item['slot']]}:", value=f"**[{item['name']}](https://classic.wowhead.com/item={iid}) {il}**\n{en}", inline=True)
+                    await messagesend(message, embed, user, guildconfig, respo=respo)
+                else:
+                    msg = "Cannot find character {} in warcraft logs".format(player.playername)
+                    embed = discord.Embed(description=msg, color=FAIL_COLOR)
+                    await messagesend(message, embed, user, guildconfig, respo=respo)
         else:
             msg = f"You must specify a game character to list gear for"
             embed = discord.Embed(description=msg, color=FAIL_COLOR)
-            await respo.delete()
-            await messagesend(message, embed, allowgeneral=False, reject=True)
+            await messagesend(message, embed, user, guildconfig, respo=respo)
     except:
         log.exception(f'Exception in player gear function')
-        await respo.delete()
-        await messagesend(message, error_embed(message), allowgeneral=True, reject=False)
+        await messagesend(message, error_embed(message), user, guildconfig, respo=respo)
 
 
 async def item(message, user, guildconfig, *args):
-    logcommand(message)
-    respo = await wait_message(message)
+    logcommand(message, user)
+    respo = await wait_message(message, user, guildconfig)
     try:
         if args:
             servertimezone = guildconfig.get("server", "server_timezone")
             if not isinstance(args[0], Number):
                 argstring = ' '.join(args)
                 itemdata = await tsmclient.search(query=argstring, limit=1, threshold='0.8')
-                if len(itemdata) != 0:
-                    itemid = itemdata[0]['itemId']
-                else:
-                    msg = f"Cannot locate information for item: {argstring.title()}"
-                    embed = discord.Embed(description=msg, color=FAIL_COLOR)
-                    await respo.delete()
-                    await messagesend(message, embed, allowgeneral=False, reject=True)
-                    return None
+                if await checkhttperrors(message, user, guildconfig, respo, itemdata):
+                    if len(itemdata) != 0:
+                        itemid = itemdata[0]['itemId']
+                    else:
+                        msg = f"Cannot locate information for item: {argstring.title()}"
+                        embed = discord.Embed(description=msg, color=FAIL_COLOR)
+                        await messagesend(message, embed, user, guildconfig, respo=respo)
+                        return None
             else:
                 itemid = int(args[0])
             item = Item(guildconfig.get("server", "server_name"), guildconfig.get("server", "faction"), itemid)
             ires = await item.fetch()
-            if item.exists:
-                if item.lastupdate is None:
-                    dsg = 'Prices not available for this item'
+            if await checkhttperrors(message, user, guildconfig, respo, ires):
+                if item.exists:
+                    embed = discord.Embed(title="", description=f'[Wowhead Link](https://classic.wowhead.com/item={item.id}) / [ClassicDB Link](https://classicdb.ch/?item={item.id})', color=INFO_COLOR)
+                    embed.set_author(name=item.name, url=f"https://classic.wowhead.com/item={item.id}", icon_url=item.icon)
+                    msg = ""
+                    for tag in item.tags:
+                        msg = msg + f"{tag}\n"
+                    if msg == "":
+                        msg = "None"
+                    embed.add_field(name=f"Tags:", value=msg)
+                    embed.add_field(name=f"Item Level:", value=f"{item.level} ")
+                    embed.add_field(name=f"Required Level:", value=f"{item.requiredlevel} ")
+                    nprice = convertprice(item.sellprice)
+                    if nprice == '0c':
+                        embed.add_field(name=f"Vendor Price:", value="Not Sellable")
+                    else:
+                        embed.add_field(name=f"Vendor Price:", value=f"{convertprice(item.sellprice)} ")
+                    # embed.add_field(name=f"Vendor Price:", value=f"{convertprice(item.vendorprice)} ")
+                    if isinstance(item.current_auctions, Number):
+                        ica = f'**{item.current_auctions:,d}**'
+                    else:
+                        ica = f'Not Available'
+                    if isinstance(item.current_quantity, Number):
+                        icb = f'**{item.current_quantity:,d}**'
+                    else:
+                        icb = f'Not Available'
+                    embed.add_field(name=f"Current Auctions/Prices:", value=f"Auctions: **{ica}**\nQuantity Available: **{icb}**\nMarket Value: **{convertprice(item.current_marketvalue)}**\nHistorical Value: **{convertprice(item.current_historicalvalue)}**\nMinimum Buyout: **{convertprice(item.current_minbuyout)}**", inline=False)
+                    if isinstance(item.previous_auctions, Number):
+                        ica = f'**{item.previous_auctions:,d}**'
+                    else:
+                        ica = f'Not Available'
+                    if isinstance(item.previous_quantity, Number):
+                        icb = f'**{item.previous_quantity:,d}**'
+                    else:
+                        icb = f'Not Available'
+                    embed.add_field(name=f"Previous Auctions/Prices:", value=f"Auctions: **{ica}**\nQuantity Available: **{icb}**\nMarket Value: **{convertprice(item.previous_marketvalue)}**\nHistorical Value: **{convertprice(item.previous_historicalvalue)}**\nMinimum Buyout: **{convertprice(item.previous_minbuyout)}**", inline=False)
+                    msg = ""
+                    for val in filter_details(item.name, item.tags, item.tooltip):
+                        msg = msg + f"{val}\n"
+                    if msg != "":
+                        embed.add_field(name=f"{item.name.title()} Details:", value=msg)
+                    if item.lastupdate is None:
+                        dsg = 'Prices not available for this item'
+                    else:
+                        dsg = f'Prices from {guildconfig.get("server", "server_name").title()}-{guildconfig.get("server", "faction").capitalize()} on {fix_item_time(item.lastupdate, servertimezone)}'
+                    embed.set_footer(text=dsg)
+                    await messagesend(message, embed, user, guildconfig, respo=respo)
                 else:
-                    dsg = f'Prices from {guildconfig.get("server", "faction").capitalize()} on {guildconfig.get("server", "server_name").title()} at {fix_item_time(item.lastupdate, servertimezone)}'
-                embed = discord.Embed(title="", description=dsg, color=INFO_COLOR)
-                embed.set_author(name=item.name, url=f"https://classic.wowhead.com/item={item.id}", icon_url=item.icon)
-                msg = ""
-                for tag in item.tags:
-                    msg = msg + f"{tag}\n"
-                if msg == "":
-                    msg = "None"
-                embed.add_field(name=f"Tags:", value=msg)
-                embed.add_field(name=f"Item Level:", value=f"{item.level} ")
-                embed.add_field(name=f"Required Level:", value=f"{item.requiredlevel} ")
-                embed.add_field(name=f"Sell Price:", value=f"{convertprice(item.sellprice)} ")
-                embed.add_field(name=f"Vendor Price:", value=f"{convertprice(item.vendorprice)} ")
-                if isinstance(item.current_auctions, Number):
-                    ica = f'**{item.current_auctions:,d}**'
-                else:
-                    ica = f'Not Available'
-                if isinstance(item.current_quantity, Number):
-                    icb = f'**{item.current_quantity:,d}**'
-                else:
-                    icb = f'Not Available'
-                embed.add_field(name=f"Current Auctions/Prices:", value=f"Auctions: **{ica}**\nQuantity Available: **{icb}**\nMarket Value: **{convertprice(item.current_marketvalue)}**\nHistorical Value: **{convertprice(item.current_historicalvalue)}**\nMinimum Buyout: **{convertprice(item.current_minbuyout)}**", inline=False)
-                if isinstance(item.previous_auctions, Number):
-                    ica = f'**{item.previous_auctions:,d}**'
-                else:
-                    ica = f'Not Available'
-                if isinstance(item.previous_quantity, Number):
-                    icb = f'**{item.previous_quantity:,d}**'
-                else:
-                    icb = f'Not Available'
-                embed.add_field(name=f"Previous Auctions/Prices:", value=f"Auctions: **{ica}**\nQuantity Available: **{icb}**\nMarket Value: **{convertprice(item.previous_marketvalue)}**\nHistorical Value: **{convertprice(item.previous_historicalvalue)}**\nMinimum Buyout: **{convertprice(item.previous_minbuyout)}**", inline=False)
-                msg = ""
-                for val in filter_details(item.name, item.tags, item.tooltip):
-                    msg = msg + f"{val}\n"
-                if msg != "":
-                    embed.add_field(name=f"{item.name.title()} Details:", value=msg)
-                await respo.delete()
-                await messagesend(message, embed, allowgeneral=False, reject=True)
-            else:
-                if ires is None:
-                    msg = f"Cannot locate information for item: {item.name.title()}"
-                    embed = discord.Embed(description=msg, color=FAIL_COLOR)
-                    await respo.delete()
-                    await messagesend(message, embed, allowgeneral=False, reject=True)
-                elif not ires:
-                    msg = f"Error retreiving information, please try again later."
-                    embed = discord.Embed(description=msg, color=FAIL_COLOR)
-                    await respo.delete()
-                    await messagesend(message, embed, allowgeneral=False, reject=True)
+                    if ires is None:
+                        msg = f"Cannot locate information for item: {item.name.title()}"
+                        embed = discord.Embed(description=msg, color=FAIL_COLOR)
+                        await messagesend(message, embed, user, guildconfig, respo=respo)
         else:
             msg = f"You must specify a item name or item id to get prices for"
             embed = discord.Embed(description=msg, color=FAIL_COLOR)
-            await respo.delete()
-            await messagesend(message, embed, allowgeneral=False, reject=True)
+            await messagesend(message, embed, user, guildconfig, respo=respo)
     except:
         log.exception(f'Exception in item function')
-        await respo.delete()
-        await messagesend(message, error_embed(message), allowgeneral=True, reject=False)
+        await messagesend(message, error_embed(message), user, guildconfig, respo=respo)
+
+
+async def setup(message, user, guildconfig, *args):
+    logcommand(message, user)
+    if user['user_id'] not in running_setup:
+        log.info(f"Starting Setup for {user['user_name']} from {user['guild_name']}")
+        user['setupstep'] = 1
+        running_setup[user['user_id']] = user
+        if guildconfig.get("discord", "setupran") == "True":
+            title = f'Setup has already been ran for server: {user["guild_name"]}\nWould you like to run it again?'
+            msg = f'**1**: Yes\n**2**: No'
+            embed = discord.Embed(title=title, description=msg, color=HELP_COLOR)
+            await messagesend(message, embed, user, guildconfig)
+        else:
+            title = f"Welcome to the WowInfoClassic setup wizard for server: {user['guild_name']}"
+            msg = "Type cancel at any time to cancel setup"
+            embed = discord.Embed(title=title, description=msg, color=HELP_COLOR)
+            await messagesend(message, embed, user, guildconfig)
+            await setup2(message, user, guildconfig, *args)
+
+
+async def response1(message, user, guildconfig, *args):
+    resp = message.content
+    if resp != '1' and resp != '2':
+        log.warning(f"Invalid answer to start setup again [{message.content}]")
+        msg = 'Invalid response.  Select 1 or 2'
+        embed = discord.Embed(description=msg, color=FAIL_COLOR)
+        await messagesend(message, embed, user, guildconfig)
+        await setup(message, user, guildconfig, *args)
+    elif resp == '1':
+        await setup2(message, user, guildconfig, *args)
+    elif resp == '2':
+        title = f'Setup wizard has been cancelled for server: {user["guild_name"]}'
+        msg = f'Type {guildconfig.get("discord", "command_prefix")}setup in the future to run the setup wizard again'
+        embed = discord.Embed(title=title, description=msg, color=FAIL_COLOR)
+        del running_setup[user['user_id']]
+        await messagesend(message, embed, user, guildconfig)
+
+
+async def setup2(message, user, guildconfig, *args):
+    user['setupstep'] = 2
+    running_setup[user['user_id']] = user
+    title = 'Select your World of Warcraft Classic server region:'
+    msg = '**1**: US\n**2**: EU'
+    embed = discord.Embed(title=title, description=msg, color=HELP_COLOR)
+    await messagesend(message, embed, user, guildconfig)
+
+
+async def response2(message, user, guildconfig, *args):
+    resp = message.content
+    if resp != '1' and resp != '2':
+        msg = 'Invalid selection. Please answer 1 or 2'
+        embed = discord.Embed(description=msg, color=FAIL_COLOR)
+        await messagesend(message, embed, user, guildconfig)
+        await setup2(message, user, guildconfig, *args)
+    else:
+        if resp == '1':
+            guildconfig.set('server', 'server_region', 'US')
+        elif resp == '2':
+            guildconfig.set('server', 'server_region', 'EU')
+        await guildconfig.write()
+        await setup3(message, user, guildconfig, *args)
+
+
+async def setup3(message, user, guildconfig, *args):
+    user['setupstep'] = 3
+    running_setup[user['user_id']] = user
+    title = 'Select your World of Warcraft Classic server:'
+    blizcli = BlizzardAPI(bliz_int_client, bliz_int_secret, guildconfig.get("server", "server_region"))
+    await blizcli.authorize()
+    realms = await blizcli.realm_list()
+    await blizcli.close()
+    num = 1
+    slist = {}
+    for realm in realms['realms']:
+        if not realm['name']['en_US'].startswith('US') and not realm['name']['en_US'].startswith('EU'):
+            slist[num] = {'name': realm['name']['en_US'], 'slug': realm['slug'], 'id': realm['id']}
+            num = num + 1
+    msg = ''
+    user['serverlist'] = sorted(slist.items())
+    running_setup[user['user_id']] = user
+    for sname, sval in sorted(slist.items()):
+        msg = msg + f'**{sname}**: {sval["name"]}\n'
+    embed = discord.Embed(title=title, description=msg, color=HELP_COLOR)
+    await messagesend(message, embed, user, guildconfig)
+
+
+async def response3(message, user, guildconfig, *args):
+    resp = message.content
+    try:
+        int(resp)
+    except:
+        msg = 'Invalid server selection'
+        embed = discord.Embed(description=msg, color=FAIL_COLOR)
+        await messagesend(message, embed, user, guildconfig)
+        await setup3(message, user, guildconfig, *args)
+    else:
+        setup_user = running_setup[user['user_id']]
+        slist = setup_user['serverlist']
+        if (int(resp) - 1) > len(slist) or (int(resp) - 1) < 1:
+            msg = 'Invalid server selection'
+            embed = discord.Embed(description=msg, color=FAIL_COLOR)
+            await messagesend(message, embed, user, guildconfig)
+            await setup3(message, user, guildconfig, *args)
+        else:
+            svr = slist[int(resp) - 1][1]
+            blizcli = BlizzardAPI(bliz_int_client, bliz_int_secret, guildconfig.get("server", "server_region"))
+            await blizcli.authorize()
+            svr_info = await blizcli.realm_info(svr['slug'])
+            await blizcli.close()
+            guildconfig.set('server', 'server_name', svr_info['name']['en_US'])
+            guildconfig.set('server', 'server_timezone', svr_info['timezone'])
+            guildconfig.set('server', 'server_id', svr_info['id'])
+            guildconfig.set('server', 'server_region_name', svr_info['region']['name']['en_US'])
+            guildconfig.set('server', 'server_region_id', svr_info['region']['id'])
+            guildconfig.set('server', 'server_locale', svr_info['locale'])
+            guildconfig.set('server', 'server_type', svr_info['type']['type'])
+            guildconfig.set('server', 'server_category', svr_info['category']['en_US'])
+            guildconfig.set('server', 'server_slug', svr_info['slug'])
+            await guildconfig.write()
+            await setup4(message, user, guildconfig, *args)
+
+
+async def setup4(message, user, guildconfig, *args):
+    user['setupstep'] = 4
+    running_setup[user['user_id']] = user
+    title = 'Select your World of Warcraft Classic faction:'
+    msg = '**1**: Alliance\n**2**: Horde'
+    embed = discord.Embed(title=title, description=msg, color=HELP_COLOR)
+    await messagesend(message, embed, user, guildconfig)
+
+
+async def response4(message, user, guildconfig, *args):
+    resp = message.content
+    if resp != '1' and resp != '2':
+        msg = 'Invalid selection.  Please answer 1 or 2'
+        embed = discord.Embed(description=msg, color=FAIL_COLOR)
+        await messagesend(message, embed, user, guildconfig)
+        await setup2(message, user, guildconfig, *args)
+    else:
+        if resp == '1':
+            guildconfig.set('server', 'faction', 'Alliance')
+        elif resp == '2':
+            guildconfig.set('server', 'faction', 'Horde')
+        await guildconfig.write()
+        await setup5(message, user, guildconfig, *args)
+
+
+async def setup5(message, user, guildconfig, *args):
+    user['setupstep'] = 5
+    running_setup[user['user_id']] = user
+    title = "Please enter your World of Warcraft Classic Guild's name:"
+    embed = discord.Embed(title=title, color=HELP_COLOR)
+    await messagesend(message, embed, user, guildconfig)
+
+
+async def response5(message, user, guildconfig, *args):
+    resp = message.content.title()
+    guildconfig.set('server', 'guild_name', resp)
+    await guildconfig.write()
+    await setup6(message, user, guildconfig, *args)
+
+
+async def setup6(message, user, guildconfig, *args):
+    user['setupstep'] = 6
+    running_setup[user['user_id']] = user
+    msg = ''
+    title = "Select which discord role is allowed to change bot settings (admin):"
+    rguild = None
+    for guild in bot.guilds:
+        member = discord.utils.get(guild.members, id=message.author.id)
+        if member:
+            rguild = guild
+            break
+    num = 1
+    roles = {}
+    for role in rguild.roles:
+        if role.name != '@everyone':
+            roles[num] = role
+            msg = msg + f'**{num}**: {role.name}\n'
+            num = num + 1
+    user['roles'] = roles
+    running_setup[user['user_id']] = user
+    embed = discord.Embed(title=title, description=msg, color=HELP_COLOR)
+    await messagesend(message, embed, user, guildconfig)
+
+
+async def response6(message, user, guildconfig, *args):
+    resp = message.content
+    try:
+        int(resp)
+    except:
+        msg = 'Invalid role selection'
+        embed = discord.Embed(description=msg, color=FAIL_COLOR)
+        await messagesend(message, embed, user, guildconfig)
+        await setup6(message, user, guildconfig, *args)
+    else:
+        if int(resp) > (len(running_setup[user['user_id']]['roles']) - 1) or int(resp) < 1:
+            msg = 'Invalid role selection'
+            embed = discord.Embed(description=msg, color=FAIL_COLOR)
+            await messagesend(message, embed, user, guildconfig)
+            await setup6(message, user, guildconfig, *args)
+        else:
+            srole = running_setup[user['user_id']]['roles'][int(resp)]
+            guildconfig.set('discord', 'admin_role_id', srole.id)
+            guildconfig.set('discord', 'admin_role', srole.name)
+            await guildconfig.write()
+            await setup7(message, user, guildconfig, *args)
+
+
+async def setup7(message, user, guildconfig, *args):
+    user['setupstep'] = 7
+    running_setup[user['user_id']] = user
+    msg = ''
+    title = "Select which discord role that should be allowed to use bot commands:"
+    rguild = None
+    for guild in bot.guilds:
+        member = discord.utils.get(guild.members, id=message.author.id)
+        if member:
+            rguild = guild
+            break
+    num = 1
+    roles = {}
+    for role in rguild.roles:
+        roles[num] = role
+        msg = msg + f'**{num}**: {role.name}\n'
+        num = num + 1
+    user['roles'] = roles
+    running_setup[user['user_id']] = user
+    embed = discord.Embed(title=title, description=msg, color=HELP_COLOR)
+    await messagesend(message, embed, user, guildconfig)
+
+
+async def response7(message, user, guildconfig, *args):
+    resp = message.content
+    try:
+        int(resp)
+    except:
+        msg = 'Invalid role selection'
+        embed = discord.Embed(description=msg, color=FAIL_COLOR)
+        await messagesend(message, embed, user, guildconfig)
+        await setup7(message, user, guildconfig, *args)
+    else:
+        if int(resp) > (len(running_setup[user['user_id']]['roles']) - 1) or int(resp) < 1:
+            msg = 'Invalid role selection'
+            embed = discord.Embed(description=msg, color=FAIL_COLOR)
+            await messagesend(message, embed, user, guildconfig)
+            await setup7(message, user, guildconfig, *args)
+        else:
+            srole = running_setup[user['user_id']]['roles'][int(resp)]
+            guildconfig.set('discord', 'user_role_id', srole.id)
+            guildconfig.set('discord', 'user_role', srole.name)
+            await guildconfig.write()
+            await setup8(message, user, guildconfig, *args)
+
+
+async def setup8(message, user, guildconfig, *args):
+    user['setupstep'] = 8
+    running_setup[user['user_id']] = user
+    title = 'Select where the bot should respond:'
+    msg = '**1**: Private Message Only (No Channels)\n**2**: Private Message & 1 Specific Channel Only\n**3**: Private Message & Any Channel'
+    embed = discord.Embed(title=title, description=msg, color=HELP_COLOR)
+    await messagesend(message, embed, user, guildconfig)
+
+
+async def response8(message, user, guildconfig, *args):
+    resp = message.content
+    if resp != '1' and resp != '2' and resp != '3':
+        msg = 'Invalid selection.  Please answer 1, 2, or 3'
+        embed = discord.Embed(description=msg, color=FAIL_COLOR)
+        await messagesend(message, embed, user, guildconfig)
+        await setup8(message, user, guildconfig, *args)
+    else:
+        if resp == '1':
+            guildconfig.set('discord', 'pm_only', 'True')
+            guildconfig.set('discord', 'limit_to_channel', 'None')
+            await guildconfig.write()
+            await setup10(message, user, guildconfig, *args)
+        elif resp == '2':
+            guildconfig.set('discord', 'pm_only', 'False')
+            await guildconfig.write()
+            await setup9(message, user, guildconfig, *args)
+        elif resp == '3':
+            guildconfig.set('discord', 'pm_only', 'False')
+            guildconfig.set('discord', 'limit_to_channel', 'Any')
+            await guildconfig.write()
+            await setup10(message, user, guildconfig, *args)
+
+
+async def setup9(message, user, guildconfig, *args):
+    user['setupstep'] = 9
+    running_setup[user['user_id']] = user
+    msg = ''
+    num = 1
+    channels = {}
+    title = 'Select which channel to limit the bot to:'
+    for guild in bot.guilds:
+        member = discord.utils.get(guild.members, id=message.author.id)
+        if member:
+            for channel in guild.text_channels:
+                channels[num] = channel
+                msg = msg + f'**{num}**: {channel}\n'
+                num = num + 1
+    user['channels'] = channels
+    embed = discord.Embed(title=title, description=msg, color=HELP_COLOR)
+    await messagesend(message, embed, user, guildconfig)
+
+
+async def response9(message, user, guildconfig, *args):
+    resp = message.content
+    try:
+        int(resp)
+    except:
+        msg = 'Invalid channel selection'
+        embed = discord.Embed(description=msg, color=FAIL_COLOR)
+        await messagesend(message, embed, user, guildconfig)
+        await setup9(message, user, guildconfig, *args)
+    else:
+        if int(resp) > (len(running_setup[user['user_id']]['channels']) - 1) or int(resp) < 1:
+            msg = 'Invalid channel selection'
+            embed = discord.Embed(description=msg, color=FAIL_COLOR)
+            await messagesend(message, embed, user, guildconfig)
+            await setup9(message, user, guildconfig, *args)
+        else:
+            chan = running_setup[user['user_id']]['channels'][int(resp)]
+            guildconfig.set('discord', 'limit_to_channel_id', chan.id)
+            guildconfig.set('discord', 'limit_to_channel', chan.name)
+            await guildconfig.write()
+            await setup10(message, user, guildconfig, *args)
+
+
+async def setup10(message, user, guildconfig, *args):
+    user['setupstep'] = 10
+    running_setup[user['user_id']] = user
+    title = 'Paste your Warcraft Logs API Key:'
+    msg = ''
+    if guildconfig.get("warcraftlogs", "api_key") != "None":
+        msg = 'Type "keep" to keep your existing API key\n\n'
+    msg = msg + 'If you do not have a Warcraft Logs API key, get one from here:\n[Warcraft Logs User Profile](https://classic.warcraftlogs.com/profile)\nBottom of the page under Web API, you must hava a valid free Warcraft Logs account.'
+    embed = discord.Embed(title=title, description=msg, color=HELP_COLOR)
+    await messagesend(message, embed, user, guildconfig)
+
+
+async def response10(message, user, guildconfig, *args):
+    if guildconfig.get("warcraftlogs", "api_key") != "None" and message.content.lower() == "keep":
+        await setup11(message, user, guildconfig, *args)
+    else:
+        if len(message.content.lower()) != 32:
+            msg = "That does not appear to be a valid API key"
+            embed = discord.Embed(description=msg, color=FAIL_COLOR)
+            await messagesend(message, embed, user, guildconfig)
+            await setup10(message, user, guildconfig, *args)
+        else:
+            guildconfig.set('warcraftlogs', 'api_key', message.content)
+            await guildconfig.write()
+            await setup11(message, user, guildconfig, *args)
+
+
+async def setup11(message, user, guildconfig, *args):
+    user['setupstep'] = 11
+    running_setup[user['user_id']] = user
+    title = 'Paste your Blizzard API Client ID:'
+    msg = ''
+    if guildconfig.get("blizzard", "client_id") != "None":
+        msg = 'Type "keep" to keep your existing client id\n\n'
+    msg = msg + """If you do not have a Blizzard API client created, create one here:\n[Blizzard API Clients](https://develop.battle.net/access/clients)\nClick "Create Client", Then fill out the info (entries don't matter), to get a Blizzard Client ID & Secret"""
+    embed = discord.Embed(title=title, description=msg, color=HELP_COLOR)
+    await messagesend(message, embed, user, guildconfig)
+
+
+async def response11(message, user, guildconfig, *args):
+    if guildconfig.get("blizzard", "client_id") != "None" and message.content.lower() == "keep":
+        await setup12(message, user, guildconfig, *args)
+    else:
+        if len(message.content.lower()) != 32:
+            msg = "That does not appear to be a valid Client ID"
+            embed = discord.Embed(description=msg, color=FAIL_COLOR)
+            await messagesend(message, embed, user, guildconfig)
+            await setup11(message, user, guildconfig, *args)
+        else:
+            guildconfig.set('blizzard', 'client_id', message.content)
+            await guildconfig.write()
+            await setup12(message, user, guildconfig, *args)
+
+
+async def setup12(message, user, guildconfig, *args):
+    user['setupstep'] = 12
+    running_setup[user['user_id']] = user
+    title = 'Paste your Blizzard API Client SECRET:'
+    msg = ''
+    if guildconfig.get("blizzard", "client_secret") != "None":
+        msg = 'Type "keep" to keep your existing client secret\n\n'
+    msg = msg + """From same Blizzard API client created above"""
+    embed = discord.Embed(title=title, description=msg, color=HELP_COLOR)
+    await messagesend(message, embed, user, guildconfig)
+
+
+async def response12(message, user, guildconfig, *args):
+    if guildconfig.get("blizzard", "client_secret") != "None" and message.content.lower() == "keep":
+        await setup13(message, user, guildconfig, *args)
+    else:
+        if len(message.content.lower()) != 32:
+            msg = "That does not appear to be a valid Client Secret"
+            embed = discord.Embed(description=msg, color=FAIL_COLOR)
+            await messagesend(message, embed, user, guildconfig)
+            await setup12(message, user, guildconfig, *args)
+        else:
+            guildconfig.set('blizzard', 'client_secret', message.content)
+            await guildconfig.write()
+            await setup13(message, user, guildconfig, *args)
+
+
+async def setup13(message, user, guildconfig, *args):
+    user['setupstep'] = 13
+    running_setup[user['user_id']] = user
+    title = "Select a command prefix for bot commands:"
+    embed = discord.Embed(title=title, color=HELP_COLOR)
+    for num, cmd in COMMAND_PREFIXES.items():
+        embed.add_field(name=f"{num}: {cmd[0]}", value=f"{cmd[1]}")
+    await messagesend(message, embed, user, guildconfig)
+
+
+async def response13(message, user, guildconfig, *args):
+    resp = message.content
+    try:
+        int(resp)
+    except:
+        msg = f'Invalid selection.  Please select 1 through {len(COMMAND_PREFIXES)}'
+        embed = discord.Embed(description=msg, color=FAIL_COLOR)
+        await messagesend(message, embed, user, guildconfig)
+        await setup13(message, user, guildconfig, *args)
+    else:
+        if int(resp) < 1 or int(resp) > len(COMMAND_PREFIXES):
+            msg = f'Invalid selection.  Please select 1 through {len(COMMAND_PREFIXES)}'
+            embed = discord.Embed(description=msg, color=FAIL_COLOR)
+            await messagesend(message, embed, user, guildconfig)
+            await setup13(message, user, guildconfig, *args)
+        else:
+            guildconfig.set('discord', 'command_prefix', COMMAND_PREFIXES[int(resp)][0])
+            await guildconfig.write()
+            del running_setup[user['user_id']]
+            guildconfig.set("discord", "setupran", "True")
+            await guildconfig.write()
+            title = 'WowInfoClassic setup wizard complete!'
+            embed = discord.Embed(title=title, color=HELP_COLOR)
+            await messagesend(message, embed, user, guildconfig)
 
 
 async def setting(message, user, guildconfig, *args):
-    logcommand(message)
-    respo = await wait_message(message)
+    logcommand(message, user)
     try:
-        if args:
-            if args[0] == "list" or args[0] == "show":
-                embed = discord.Embed(title="WoWInfoBot Settings", description=f'Discord Server Name: {user["guild_name"]}\nDiscord Server ID: {user["guild_id"]}', color=HELP_COLOR)
-                for sec, val in guildconfig._sections.items():
-                    msg = ''
-                    for key, value in val.items():
-                        if key != 'admin_role_id' and key != 'user_role_id':
-                            if key == 'api_key' or key == 'client_id' or key == 'client_secret':
-                                if value != 'None':
-                                    value = '***************'
-                            msg = msg + f'{key.title()}: **{value}**\n'
-                    embed.add_field(name=sec.capitalize(), value=msg, inline=False)
-                await messagesend(message, embed, allowgeneral=False, reject=True)
-
-            if args[0] == "timezone":
-                guildconfig.set('server', 'server_timezone', args[1])
-                await guildconfig.write()
-                await setting(message, user, guildconfig, 'list')
-
-            if args[0] == "guildname":
-                guildconfig.set('server', 'guild_name', args[1])
-                await guildconfig.write()
-                await setting(message, user, guildconfig, 'list')
-
-            if args[0] == "servername":
-                guildconfig.set('server', 'server_name', args[1])
-                await guildconfig.write()
-                await setting(message, user, guildconfig, 'list')
-
-            if args[0] == "faction":
-                if args[1].lower() == 'alliance' or args[1].lower() == 'horde':
-                    guildconfig.set('server', 'faction', args[1].capitalize())
-                    await guildconfig.write()
-                    await setting(message, user, guildconfig, 'list')
-                else:
-                    msg = f"Invalid faction, must be Alliance or Horde"
-                    embed = discord.Embed(description=msg, color=FAIL_COLOR)
-                    await messagesend(message, embed, allowgeneral=False, reject=True)
-
-            if args[0] == "prefix":
-                guildconfig.set('discord', 'command_prefix', args[1])
-                await guildconfig.write()
-                await setting(message, user, guildconfig, 'list')
-
-            if args[0] == "warcraftlogsapikey":
-                guildconfig.set('warcraftlogs', 'api_key', args[1])
-                await guildconfig.write()
-                await setting(message, user, guildconfig, 'list')
-
-            if args[0] == "blizzardapiclientid":
-                guildconfig.set('blizzard', 'client_id', args[1])
-                await guildconfig.write()
-                await setting(message, user, guildconfig, 'list')
-
-            if args[0] == "blizzardapiclientsecret":
-                guildconfig.set('blizzard', 'client_secret', args[1])
-                await guildconfig.write()
-                await setting(message, user, guildconfig, 'list')
-
-            if args[0] == "pmonly":
-                if args[1].lower() != 'on' and args[1].lower() != 'off' and args[1].lower() != 'false' and args[1].lower() != 'true':
-                    msg = "Invalid option, must be True/False or On/Off"
-                    embed = discord.Embed(description=msg, color=FAIL_COLOR)
-                    await messagesend(message, embed, allowgeneral=False, reject=True)
-                else:
-                    if args[1].lower() != 'on' or args[1].lower() != 'true':
-                        pm = True
-                    elif args[1].lower() != 'on' or args[1].lower() != 'true':
-                        pm = False
-                    guildconfig.set('discord', 'pm_only', pm)
-                    await guildconfig.write()
-                    await setting(message, 'list')
+        embed = discord.Embed(title="WoWInfoClassic Bot Settings", description=f'Discord Server Name: **{user["guild_name"]}**', color=HELP_COLOR)
+        for sec, val in guildconfig._sections.items():
+            msg = ''
+            for key, value in val.items():
+                if key != 'admin_role_id' and key != 'user_role_id' and key != 'setupran' and key != 'server_slug' and key != 'server_locale' and key != 'server_region_id' and key != 'server_id' and key != 'limit_to_channel_id':
+                    if key == 'api_key' or key == 'client_id' or key == 'client_secret':
+                        if value != 'None':
+                            value = '<secret>'
+                    msg = msg + f'{key.title()}: **{value}**\n'
+            embed.add_field(name=sec.capitalize(), value=msg, inline=False)
+        await messagesend(message, embed, user, guildconfig)
     except:
         log.exception(f'Exception in settings function')
-        await respo.delete()
-        await messagesend(message, error_embed(message), allowgeneral=True, reject=False)
+        await messagesend(message, error_embed(message), user, guildconfig)
 
 
-@bot.command(name="admin", aliases=["root"], pass_context=True)
-@commands.check(logcommand)
-#@commands.check(is_admin)
-async def admin(message, *args):
-    #pprint(message.guild.id)
-    #pprint(dir(message.message.author))
-    pprint(await user_info(message))
-
-'''
+async def admin(message, user, guildconfig, *args):
     if args:
         if args[0].startswith('con') or args[0] == 'servers':
             embed = discord.Embed(title="Servers Connected:", description=f"Discord Latency: {truncate_float(bot.latency, 2)}", color=HELP_COLOR)
             for eguild in bot.guilds:
                 msg = f"ServerID: {eguild.id}\nShardID: {eguild.shard_id}\nChunked: {eguild.chunked}\nClients: {eguild.member_count}\n\n"
                 embed.add_field(name=f"{eguild.name}", value=msg)
-            async for each in bot.fetch_guilds():
-                pprint(each)
-            await message.message.author.send(embed=embed)
+            await message.author.send(embed=embed)
         if args[0] == 'invite':
-            msg = 'https://discord.com/oauth2/authorize?bot_id=750867600250241086&scope=bot&permissions=604302400'
+            msg = 'https://discord.com/oauth2/authorize?bot_id=750867600250241086&scope=bot&permissions=8'
             embed = discord.Embed(description=msg, color=HELP_COLOR)
-            await messagesend(message, embed, allowgeneral=False, reject=True)
-    se:
+            await messagesend(message, embed, user, guildconfig)
+    else:
         msg = f"You must specify an admin command"
         embed = discord.Embed(description=msg, color=FAIL_COLOR)
-        await messagesend(message, embed, allowgeneral=False, reject=True)
-'''
+        await messagesend(message, embed, user, guildconfig)
 
 
 async def help(message, user, guildconfig, *args):
-    logcommand(message)
+    logcommand(message, user)
     command_prefix = guildconfig.get("discord", "command_prefix")
-    msg = "Commands can be privately messaged directly to the bot or in channels"
+    if guildconfig.get("discord", "pm_only") == "True":
+        msg = "Commands can be privately messaged directly to the bot, the reply will be in a private message."
+    elif guildconfig.get("discord", "limit_to_channel") == 'Any':
+        msg = "Commands can be privately messaged directly to the bot or in any channel, the reply will be in the channel you sent the command from."
+    else:
+        msg = f'Commands can be privately messaged directly to the bot or in the #{guildconfig.get("discord", "limit_to_channel")} channel, the reply will be in the #{guildconfig.get("discord", "limit_to_channel")} channel or a private message'
     embed = discord.Embed(title="WoW Info Classic Bot Commands:", description=msg, color=HELP_COLOR)
     embed.add_field(name=f"**`{command_prefix}raids [optional instance name]`**", value=f"Last 5 raids for the guild, [MC,ONY,BWL,ZG,AQ20,AQ40]\nLeave instance name blank for all", inline=False)
     embed.add_field(name=f"**`{command_prefix}player <character name>`**", value=f"Character information from last logged encounters", inline=False)
     embed.add_field(name=f"**`{command_prefix}gear <character name>`**", value=f"Character gear from last logged encounters", inline=False)
     embed.add_field(name=f"**`{command_prefix}price <item name>`**", value=f"Price and information for an item", inline=False)
     embed.add_field(name=f"**`{command_prefix}item <item name>`**", value=f"Same as price command", inline=False)
+    embed.add_field(name=f"**`{command_prefix}server`**", value=f"Status and info of the World of Warcraft Classic server", inline=False)
     embed.add_field(name=f"**`{command_prefix}news`**", value=f"Latest World of Warcraft Classic News", inline=False)
     embed.add_field(name=f"**`{command_prefix}help`**", value=f"This help message", inline=False)
-    print(dir(message.author))
+    if user['is_admin']:
+        embed.add_field(name=f"**`{command_prefix}setup`**", value=f"Run the bot setup wizard (admins only)", inline=False)
+        embed.add_field(name=f"**`{command_prefix}settings`**", value=f"Current bot settings (admins only)", inline=False)
     await message.author.send(embed=embed)
-    if (type(message.channel) != discord.channel.DMChannel and str(message.channel) != "bot-channel"):
-        await message.delete()
+
+
+async def test(message, user, guildconfig, *args):
+    logcommand(message, user)
+    # blizcli = BlizzardAPI(bliz_int_client, bliz_int_secret, guildconfig.get("server", "server_region"))
+    # await blizcli.authorize()
+    # pprint(await blizcli.realm_list())
+    pprint(guildconfig._sections)
 
 
 def main():
@@ -976,8 +1413,6 @@ if __name__ == '__main__':
         main()
     except KeyboardInterrupt:
         log.info(f'Termination signal [KeyboardInterrupt] Closing web sessions.')
-        wclbot.close()
-        tsmbot.close()
         log.info(f'Exiting.')
         exit(0)
         try:
