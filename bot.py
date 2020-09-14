@@ -124,7 +124,7 @@ ROLES = ['Tank', 'Healer', 'DPS']
 
 RZONE = {1005: "Ahn'Qiraj 40", 1002: "Blackwing Lair", 1004: "Ahn'Qiraj 20", 1000: "Molten Core", 1003: "Zul'Gurub", 1001: "Onyxia"}
 
-BOSSREF = {'Onyxia': 1001, 'Ragnaros': 1000, 'Lucifron': 1000, 'Magmadar': 1000, 'Gehennas': 1000, 'Garr': 1000, 'Baron Geddon': 1000, 'Shazzrah': 1000, 'Sulfuron Harbinger': 1000, 'Golemagg the Incinerator': 1000, 'Majordomo Executus': 1000, 'Ossirian the Unscarred': 1004, 'Ayamiss the Hunter': 1004, 'Buru the Gorger': 1004, 'Moam': 1004, 'General Rajaxx': 1004, 'Kurinnaxx': 1004, 'Nefarian': 1002, 'Chromaggus': 1000, "Jin'do the Hexxer": 1003, 'High Priest Thekal': 1003, "C'Thun": 1005, 'Ouro': 1005, 'Hakkar': 1003, 'Flamegor': 1002, 'Ebonroc': 1002, 'Princess Huhuran': 1005, 'The Prophet Skeram': 1005, 'Firemaw': 1002, 'Broodlord Lashlayer': 1002, 'Vaelastrasz the Corrupt': 1002}
+BOSSREF = {'Onyxia': 1001, 'Ragnaros': 1000, 'Lucifron': 1000, 'Magmadar': 1000, 'Gehennas': 1000, 'Garr': 1000, 'Baron Geddon': 1000, 'Shazzrah': 1000, 'Sulfuron Harbinger': 1000, 'Golemagg the Incinerator': 1000, 'Majordomo Executus': 1000, 'Ossirian the Unscarred': 1004, 'Ayamiss the Hunter': 1004, 'Buru the Gorger': 1004, 'Moam': 1004, 'General Rajaxx': 1004, 'Kurinnaxx': 1004, 'Nefarian': 1002, 'Chromaggus': 1000, "Jin'do the Hexxer": 1003, 'High Priest Thekal': 1003, "C'Thun": 1005, 'Ouro': 1005, 'Hakkar': 1003, 'Flamegor': 1002, 'Ebonroc': 1002, 'Princess Huhuran': 1005, 'The Prophet Skeram': 1005, 'Firemaw': 1002, 'Broodlord Lashlayer': 1002, 'Vaelastrasz the Corrupt': 1002, 'Viscidus': 1005, 'Twin Emperors': 1005}
 
 BZONE = {1001: 1, 1003: 9, 1000: 10, 1004: 6, 1002: 8, 1005: 9}
 
@@ -1339,6 +1339,8 @@ async def response13(message, user, guildconfig, *args):
             await guildconfig.write()
             del running_setup[user['user_id']]
             guildconfig.set("discord", "setupran", "True")
+            guildconfig.set("discord", "setupadmin", user['user_name'])
+            guildconfig.set("discord", "setupadmin_id", user['user_id'])
             await guildconfig.write()
             title = 'WowInfoClassic setup wizard complete!'
             embed = discord.Embed(title=title, color=HELP_COLOR)
@@ -1367,9 +1369,11 @@ async def setting(message, user, guildconfig, *args):
 async def admin(message, user, guildconfig, *args):
     if args:
         if args[0].startswith('con') or args[0] == 'servers':
-            embed = discord.Embed(title="Servers Connected:", description=f"Discord Latency: {truncate_float(bot.latency, 2)}", color=HELP_COLOR)
+            embed = discord.Embed(title=f"Servers Connected ({len(bot.guilds)})", description=f"Discord Latency: {truncate_float(bot.latency, 2)}", color=HELP_COLOR)
             for eguild in bot.guilds:
-                msg = f"ServerID: {eguild.id}\nShardID: {eguild.shard_id}\nChunked: {eguild.chunked}\nClients: {eguild.member_count}\n\n"
+                guildconfig = GuildConfigParser(redis, str(eguild.id))
+                await guildconfig.read()
+                msg = f"ServerID: **{eguild.id}**\nRealm: **{guildconfig.get('server', 'server_category')}**\nGuild: **{guildconfig.get('server', 'guild_name')}**\nFaction: **{guildconfig.get('server', 'faction')}**\nTimezone: **{guildconfig.get('server', 'server_timezone')}**\nShardID: **{eguild.shard_id}**\nChunked: **{eguild.chunked}**\nClients: **{eguild.member_count}**\nSetup Ran? **{guildconfig.get('discord','setupran')}**\nSetup Admin: **{guildconfig.get('discord', 'setupadmin')}**\n\n"
                 embed.add_field(name=f"{eguild.name}", value=msg)
             await message.author.send(embed=embed)
         if args[0] == 'invite':
