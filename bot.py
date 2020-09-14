@@ -5,7 +5,8 @@ from datetime import datetime
 from math import trunc
 from numbers import Number
 from os import _exit, path, stat
-from sys import exit, stdout
+from pathlib import Path
+from sys import argv, exit, stdout
 
 import discord
 from discord.ext import commands
@@ -13,9 +14,9 @@ from loguru import logger as log
 from prettyprinter import pprint
 from pytz import timezone
 
-from apifetch import NexusAPI, WarcraftLogsAPI, BlizzardAPI
-from processlock import PLock
+from apifetch import BlizzardAPI, NexusAPI, WarcraftLogsAPI
 from guildconfigparser import GuildConfigParser, RedisPool
+from processlock import PLock
 
 configfile = '/etc/wowinfobot.cfg'
 signals = (0, 'SIGHUP', 'SIGINT', 'SIGQUIT', 4, 5, 6, 7, 8, 'SIGKILL', 10, 11, 12, 13, 14, 'SIGTERM')
@@ -33,8 +34,16 @@ signal.signal(signal.SIGHUP, signal_handler)  # Reload/Restart
 signal.signal(signal.SIGINT, signal_handler)  # Hard Exit
 signal.signal(signal.SIGQUIT, signal_handler)  # Hard Exit
 
-processlock = PLock()
-processlock.lock()
+head_dir = Path(".") / ".git" / "HEAD"
+with head_dir.open("r") as f:
+    content = f.read().splitlines()
+for line in content:
+    if line[0:4] == "ref:":
+        BRANCH = line.partition("refs/heads/")[2]
+
+if BRANCH != 'develop':
+    processlock = PLock()
+    processlock.lock()
 
 if not path.exists(configfile) or stat(configfile).st_size == 0:
     log.error(f"Config file: {configfile} doesn't exist or is empty. Exiting.")
@@ -55,13 +64,12 @@ for section, options in configtemplate.items():
                 log.error(f'Error: Missing config option {option} in {section} in config file: {configfile}. Exiting.')
                 exit(1)
 
-logfile = systemconfig.get("general", "logfile")
-loglevel = systemconfig.get("general", "loglevel")
+logfile = Path(systemconfig.get("general", "logfile"))
 redis_host = systemconfig.get("general", "redis_host")
 redis_port = systemconfig.get("general", "redis_port")
 redis_db = systemconfig.get("general", "redis_db")
-command_prefix = systemconfig.get("discord", "command_prefix")
 discordkey = systemconfig.get("discord", "api_key")
+discordkey_dev = systemconfig.get("discord", "dev_key")
 superadmin_id = systemconfig.get("discord", "superadmin_id")
 bliz_int_client = systemconfig.get("blizzard_api", "client_id")
 bliz_int_secret = systemconfig.get("blizzard_api", "secret")
@@ -73,21 +81,31 @@ logformat = "{time:YYYY-MM-DD HH:mm:ss.SSS}| {level: <8} | {message} |{function}
 
 log.remove()
 
-log.add(sink=stdout, level=loglevel, format=consoleformat, colorize=True)
+if len(argv) > 1 or BRANCH == "develop":
+    ll = "DEBUG"
+    log.add(sink=stdout, level=ll, format=consoleformat, colorize=True)
+    if BRANCH == "develop":
+        devfile = logfile.stem + "-dev" + logfile.suffix
+        logfile = logfile.parent / devfile
+else:
+    ll = "INFO"
 
-log.add(sink=str(logfile), level=loglevel, buffering=1, enqueue=True, backtrace=True, format=logformat, diagnose=True, serialize=False, delay=False, colorize=False, rotation="5 MB", retention="1 month", compression="tar.gz")
+log.add(sink=str(logfile), level=ll, buffering=1, enqueue=True, backtrace=True, format=logformat, diagnose=True, serialize=False, delay=False, colorize=False, rotation="5 MB", retention="1 month", compression="tar.gz")
 
 log.debug(f'System configuration loaded successfully from {configfile}')
 log.debug(f'Logfile started: {logfile}')
 
-bot = commands.Bot(command_prefix=command_prefix, case_insensitive=True)
+if BRANCH == 'develop':
+    log.warning(f'WoWInfoClassic Bot is starting in DEV MODE!')
+else:
+    log.info(f'WoWInfoClassic Bot is starting in PRODUCTION MODE!')
+
+bot = commands.Bot(command_prefix="=", case_insensitive=True)
 bot.remove_command("help")
 log.debug('Discord class initalized')
 
 redis = RedisPool(redis_host, redis_port, redis_db)
 bot.loop.create_task(redis.connect())
-# wclbot = WarcraftLogsAPI(wcl_url, wcl_api)
-# log.debug('WarcraftLogsAPI class initalized')
 tsmclient = NexusAPI(tsm_url)
 log.debug('NexusAPI class initalized')
 
@@ -459,18 +477,8 @@ def logcommand(message, user):
 
 
 async def wait_message(message, user, guildconfig):
-    #pprint(dir(message.channel))
     await message.channel.trigger_typing()
     return None
-    #if guildconfig.get('discord', 'pm_only') == "True" or (guildconfig.get('discord', 'limit_to_channel') != "Any" and str(message.channel.id) != guildconfig.get('discord', 'limit_to_channel_id')):
-    #    if type(message.channel) == discord.channel.DMChannel:
-    #        embed = discord.Embed(description="Please wait, fetching information...", color=INFO_COLOR)
-    #        return await messagesend(message, embed, user, guildconfig)
-    #    else:
-    #        return None
-    #else:
-    #    embed = discord.Embed(description="Please wait, fetching information...", color=INFO_COLOR)
-    #    return await messagesend(message, embed, user, guildconfig)
 
 
 def error_embed(message):
@@ -1086,7 +1094,7 @@ async def response6(message, user, guildconfig, *args):
         await messagesend(message, embed, user, guildconfig)
         await setup6(message, user, guildconfig, *args)
     else:
-        if int(resp) > (len(running_setup[user['user_id']]['roles']) - 1) or int(resp) < 1:
+        if int(resp) > (len(running_setup[user['user_id']]['roles'])) or int(resp) < 1:
             msg = 'Invalid role selection'
             embed = discord.Embed(description=msg, color=FAIL_COLOR)
             await messagesend(message, embed, user, guildconfig)
@@ -1132,7 +1140,7 @@ async def response7(message, user, guildconfig, *args):
         await messagesend(message, embed, user, guildconfig)
         await setup7(message, user, guildconfig, *args)
     else:
-        if int(resp) > (len(running_setup[user['user_id']]['roles']) - 1) or int(resp) < 1:
+        if int(resp) > (len(running_setup[user['user_id']]['roles'])) or int(resp) < 1:
             msg = 'Invalid role selection'
             embed = discord.Embed(description=msg, color=FAIL_COLOR)
             await messagesend(message, embed, user, guildconfig)
@@ -1207,7 +1215,7 @@ async def response9(message, user, guildconfig, *args):
         await messagesend(message, embed, user, guildconfig)
         await setup9(message, user, guildconfig, *args)
     else:
-        if int(resp) > (len(running_setup[user['user_id']]['channels']) - 1) or int(resp) < 1:
+        if int(resp) > (len(running_setup[user['user_id']]['channels'])) or int(resp) < 1:
             msg = 'Invalid channel selection'
             embed = discord.Embed(description=msg, color=FAIL_COLOR)
             await messagesend(message, embed, user, guildconfig)
@@ -1407,7 +1415,10 @@ async def test(message, user, guildconfig, *args):
 
 
 def main():
-    bot.run(discordkey)
+    if BRANCH != 'develop':
+        bot.run(discordkey)
+    else:
+        bot.run(discordkey_dev)
 
 
 if __name__ == '__main__':
@@ -1422,4 +1433,4 @@ if __name__ == '__main__':
         except SystemExit:
             _exit(0)
     except:
-        log.critical(f'Main Exception Caught!')
+        log.exception(f'Main Exception Caught!')

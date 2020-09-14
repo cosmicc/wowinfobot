@@ -1,8 +1,8 @@
 from asyncio import sleep
 from configparser import RawConfigParser
-import simplejson
 
 import aredis
+import simplejson
 from loguru import logger as log
 
 
@@ -84,8 +84,6 @@ class GuildConfigParser(RawConfigParser):
         self.add_section("blizzard")
         self.set("blizzard", "client_id", "None")
         self.set("blizzard", "client_secret", "None")
-        self.set("discord", "setupran", False)
-        #self.add_section("tradeskillmaster")
-        #self.set("tradeskillmaster", "fuzzy_search_threshold", "0.8")
+        self.set("discord", "setupran", "False")
         await self.write()
         log.debug(f'Wrote default configuration for guild id [{self.guild_id}]')

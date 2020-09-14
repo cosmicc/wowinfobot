@@ -1,11 +1,11 @@
 import asyncio
-from urllib import parse
 import json
 from http.client import responses
-from prettyprinter import pprint
+from urllib import parse
 
 import aiohttp
 from loguru import logger as log
+from prettyprinter import pprint
 
 
 class BlizzardAPI:

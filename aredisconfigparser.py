@@ -1,8 +1,8 @@
 from asyncio import sleep
 from configparser import RawConfigParser
-import simplejson
 
 import aredis
+import simplejson
 from loguru import logger as log
 
 
