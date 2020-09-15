@@ -13,7 +13,6 @@ WARCRAFTLOGS_OPTIONS = {"api_key": "None"}
 BLIZZARD_OPTIONS = {'client_id': 'None', 'client_secret': 'None'}
 
 
-
 class GuildConfigParser(RawConfigParser):
 
     def __init__(self, redis, guild_id):

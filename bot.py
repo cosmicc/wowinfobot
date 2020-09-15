@@ -6,7 +6,7 @@ from numbers import Number
 from os import _exit, path, stat
 from pathlib import Path
 from sys import argv, exit, stdout
-
+from cachemanager import getcache, putcache
 import discord
 from discord.ext import commands
 from fuzzywuzzy import fuzz
@@ -78,6 +78,10 @@ redis_port = systemconfig.get("general", "redis_port")
 cache_port = systemconfig.get("general", "cache_port")
 config_db = systemconfig.get("general", "config_db")
 cache_db = systemconfig.get("general", "cache_db")
+news_thresh = systemconfig.get("threshold", "news")
+parses_thresh = systemconfig.get("threshold", "parses")
+tables_thresh = systemconfig.get("threshold", "tables")
+fights_thresh = systemconfig.get("threshold", "fights")
 discordkey = systemconfig.get("discord", "api_key")
 discordkey_dev = systemconfig.get("discord", "dev_key")
 superadmin_id = systemconfig.get("discord", "superadmin_id")
@@ -117,10 +121,9 @@ bot.remove_command("help")
 log.debug('Discord class initalized')
 
 redis = RedisPool(redis_socket, redis_host, redis_port, config_db)
-cache = RedisPool(cache_socket, cache_host, cache_port, cache_db)
+rediscache = RedisPool(cache_socket, cache_host, cache_port, cache_db)
 bot.loop.create_task(redis.connect())
-
-bot.loop.create_task(cache.connect())
+bot.loop.create_task(rediscache.connect())
 
 tsmclient = NexusAPI(tsm_url)
 log.debug('NexusAPI class initalized')
@@ -228,7 +231,10 @@ def filter_details(name, tags, labels):
 
 
 async def fight_data(wclclient, fid):
-    fight = await wclclient.fights(fid)
+    fight = await getcache(rediscache, f'fights-{fid}')
+    if fight is None:
+        fight = await wclclient.fights(fid)
+        await putcache(rediscache, f'fights-{fid}', fight, 60 * int(fights_thresh))
     kills = 0
     wipes = 0
     size = 0
@@ -476,7 +482,7 @@ async def lastraids(message, user, guildconfig, *args):
     try:
         wclclient = WarcraftLogsAPI(wcl_url, guildconfig.get('warcraftlogs', 'api_key'))
         tz = guildconfig.get('server', 'server_timezone')
-        enclist = await wclclient.guild(user['guild_name'], guildconfig.get('server', 'server_name'), guildconfig.get('server', 'server_region'))
+        enclist = await wclclient.guild(guildconfig.get('server', 'guild_name'), guildconfig.get('server', 'server_name'), guildconfig.get('server', 'server_region'))
         if await checkhttperrors(message, user, guildconfig, enclist, placeholder='guild', resource='warcraft logs'):
             a = 1
             nzone = 0
@@ -541,12 +547,17 @@ async def lastraids(message, user, guildconfig, *args):
 async def news(message, user, guildconfig, *args):
     logcommand(message, user)
     try:
-        news = await tsmclient.news()
-        if await checkhttperrors(message, user, guildconfig, news):
-            embed = discord.Embed(title=f'World of Warcraft Classic News', color=INFO_COLOR)
-            for each in news:
-                embed.add_field(name=f"**{each['title']}**", value=f"{fix_news_time(each['pubDate'], guildconfig.get('server','server_timezone'))}\n[{each['content']}]({each['link']})", inline=False)
-            await messagesend(message, embed, user, guildconfig)
+        news = await getcache(rediscache, 'news')
+        if news is None:
+            news = await tsmclient.news()
+            if not await checkhttperrors(message, user, guildconfig, news):
+                return None
+            else:
+                await putcache(rediscache, 'news', news, 60 * int(news_thresh))
+        embed = discord.Embed(title=f'World of Warcraft Classic News', color=INFO_COLOR)
+        for each in news:
+            embed.add_field(name=f"**{each['title']}**", value=f"{fix_news_time(each['pubDate'], guildconfig.get('server','server_timezone'))}\n[{each['content']}]({each['link']})", inline=False)
+        await messagesend(message, embed, user, guildconfig)
     except:
         log.exception('Exception in news function')
         await messagesend(message, error_embed(message), user, guildconfig)
@@ -558,7 +569,7 @@ async def playerinfo(message, user, guildconfig, *args):
         if args:
             servertimezone = guildconfig.get('server', 'server_timezone')
             wclclient = WarcraftLogsAPI(wcl_url, guildconfig.get('warcraftlogs', 'api_key'))
-            player = Player(guildconfig, wclclient, args[0])
+            player = Player(guildconfig, wclclient, rediscache, parses_thresh, tables_thresh, args[0])
             pp = await player.fetch()
             await wclclient.close()
             if await checkhttperrors(message, user, guildconfig, pp, placeholder='player', resource='warcraft logs'):
@@ -606,7 +617,7 @@ async def playergear(message, user, guildconfig, *args):
     try:
         if args:
             wclclient = WarcraftLogsAPI(wcl_url, guildconfig.get('warcraftlogs', 'api_key'))
-            player = Player(guildconfig, wclclient, playername)
+            player = Player(guildconfig, wclclient, rediscache, parses_thresh, tables_thresh, playername)
             pp = await player.fetch()
             await wclclient.close()
             if await checkhttperrors(message, user, guildconfig, pp, placeholder='player', resource='warcraft logs'):

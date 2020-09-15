@@ -4,7 +4,7 @@ import aredis
 from aredis.connection import UnixDomainSocketConnection
 
 from loguru import logger as log
-
+from cachemanager import getcache, putcache
 from constants import BOSSREF, ROLES, RZONE, SPECROLES
 from timefunctions import convert_time
 
@@ -128,9 +128,12 @@ class Player:
                     if len(self.edl) > 5:
                         del self.edl[min(self.edl)]
 
-    def __init__(self, gconfig, aclient, playername):
+    def __init__(self, gconfig, aclient, rediscache, parseexp, tableexp, playername):
         self.playername = playername.capitalize()
         self.exists = False
+        self.parseexp = int(parseexp)
+        self.tableexp = int(tableexp)
+        self.rediscache = rediscache
         self.playerclass = "Not Available"
         self.playerspec = "Not Available"
         self.playerrole = "Not Available"
@@ -154,11 +157,14 @@ class Player:
 
     async def fetch(self):
         for kkey, vval in RZONE.items():
-            parselist = await self.client.parses(self.playername, self.guildconfig.get("server", "server_name").title(), self.guildconfig.get("server", "server_region").upper(), zone=kkey)
-            if 'error' in parselist[0]:
-                self.exists = False
-                return parselist
-            else:
+            parselist = await getcache(self.rediscache, f'{self.playername}-{self.guildconfig.get("server", "server_id")}-{kkey}')
+            if parselist is None:
+                parselist = await self.client.parses(self.playername, self.guildconfig.get("server", "server_name").title(), self.guildconfig.get("server", "server_region").upper(), zone=kkey)
+                await putcache(self.rediscache, f'{self.playername}-{self.guildconfig.get("server", "server_id")}-{kkey}', parselist, 60 * self.parseexp)
+            if len(parselist) > 0:
+                if 'error' in parselist[0]:
+                    self.exists = False
+                    return parselist
                 self.totalencounters = self.totalencounters + len(parselist)
                 if kkey == 1000:
                     self.mccount = self.mccount + len(parselist)
@@ -185,7 +191,11 @@ class Player:
                             self.playerspec = encounter[1]['spec']
                         else:
                             self.playerrole = encounter[1]['spec']
-                    reporttable = await self.client.tables('casts', encounter[1]['reportID'], start=0, end=18000)
+
+                    reporttable = await getcache(self.rediscache, f'tables-{encounter[1]["reportID"]}')
+                    if reporttable is None:
+                        reporttable = await self.client.tables('casts', encounter[1]['reportID'], start=0, end=18000)
+                        await putcache(self.rediscache, f'tables-{encounter[1]["reportID"]}', reporttable, 60 * self.tableexp)
 
                     for entry in reporttable['entries']:
                         if entry['name'] == self.playername:
