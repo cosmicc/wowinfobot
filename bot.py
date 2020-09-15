@@ -6,6 +6,7 @@ from numbers import Number
 from os import _exit, path, stat
 from pathlib import Path
 from sys import argv, exit, stdout
+from fuzzywuzzy import fuzz
 
 import discord
 from discord.ext import commands
@@ -16,11 +17,13 @@ from apifetch import BlizzardAPI, NexusAPI, WarcraftLogsAPI
 from classes import Item, Player
 from constants import (BOSSREF, BZONE, COMMAND_PREFIXES, FAIL_COLOR,
                        GEAR_ORDER, HELP_COLOR, INFO_COLOR, RZONE,
-                       SUCCESS_COLOR)
+                       SUCCESS_COLOR, VALID_COMMANDS)
 from guildconfigparser import GuildConfigParser, RedisPool
 from processlock import PLock
 from timefunctions import (convert_time, elapsedTime, fix_item_time,
                            fix_news_time)
+
+fuzzy_command_error = 75
 
 configfile = '/etc/wowinfobot.cfg'
 signals = (0, 'SIGHUP', 'SIGINT', 'SIGQUIT', 4, 5, 6, 7, 8, 'SIGKILL', 10, 11, 12, 13, 14, 'SIGTERM')
@@ -148,6 +151,23 @@ def convertprice(rawprice):
         return f'{gold}g {silver}s {copper}c'
 
 
+def fuzzycmdlookup(cmd):
+    ratios = {}
+    for command in VALID_COMMANDS:
+        ratio = fuzz.ratio(command, cmd)
+        ratios[command] = ratio
+    v = list(ratios.values())
+    k = list(ratios.keys())
+    if max(v) >= fuzzy_command_error:
+        if max(v) != 100:
+            log.debug(f'Fuzzy cmd lookup: {sorted(ratios.items())}')
+            log.info(f'Fuzzy command fixed [{cmd} -> {k[v.index(max(v))]}] [{max(v)}%]')
+        return k[v.index(max(v))]
+    else:
+        log.debug(f'Fuzzy cmd lookup: {sorted(ratios.items())}')
+        return None
+
+
 async def user_info(message):
     if type(message.channel) == discord.channel.DMChannel:
         for guild in bot.guilds:
@@ -239,7 +259,10 @@ async def bad_command(message, user, guildconfig, *args):
     strargs = ''
     for each in args:
         strargs = strargs + f"{each} "
-    msg = f'`{message.content}` is not a valid command.\nMaybe you mean `{pref}player {strargs}` or `{pref}item {strargs}`'
+    if len(args) == 1:
+        msg = f'`{message.content}` is not a valid command.\nMaybe you mean `{pref}player {strargs}` or `{pref}item {strargs}`\nOr try `{pref}help for a list of commands`'
+    else:
+         msg = f'`{message.content}` is not a valid command.\nMaybe you mean `{pref}item {strargs}`\nOr try `{pref}help` for a list of commands'
     embed = discord.Embed(description=msg, color=FAIL_COLOR)
     await messagesend(message, embed, user, guildconfig)
 
@@ -370,37 +393,41 @@ async def on_message(message):
                     if user['is_user'] or user['is_admin']:
                         await fake_typing(message)
                         args = message.content[1:].split(' ')
-                        if args[0].lower() in ['raids', 'last', 'lastraids', 'lastraid', 'r']:
+                        if len(args[0]) != 1:
+                            ccmd = fuzzycmdlookup(args[0].lower())
+                        else:
+                            ccmd = args[0].lower()
+                        if ccmd in ['raids', 'lastraids', 'lastraid']:
                             args.pop(0)
                             await lastraids(message, user, guildconfig, *args)
-                        elif args[0].lower() in ["news", "wownews", "warcraftnews", 'r']:
+                        elif ccmd in ["news", "wownews", "warcraftnews"]:
                             args.pop(0)
                             await news(message, user, guildconfig, *args)
-                        elif args[0].lower() in ["help", "commands", "helpme", 'h']:
+                        elif ccmd in ["help", "commands", "helpme"]:
                             args.pop(0)
                             await help(message, user, guildconfig, *args)
-                        elif args[0].lower() == "settings" and type(message.channel) == discord.channel.DMChannel and user['is_admin']:
+                        elif ccmd == "settings" and type(message.channel) == discord.channel.DMChannel and user['is_admin']:
                             args.pop(0)
                             await setting(message, user, guildconfig, *args)
-                        elif args[0].lower() in ["player", "playerinfo", "pinfo", 'p']:
+                        elif ccmd in ["player", "playerinfo", "pinfo"]:
                             args.pop(0)
                             await playerinfo(message, user, guildconfig, *args)
-                        elif args[0].lower() in ["gear", "playergear", "playeritems", 'g']:
+                        elif ccmd in ["gear", "playergear", "playeritems"]:
                             args.pop(0)
                             await playergear(message, user, guildconfig, *args)
-                        elif args[0].lower() in ["item", "price", "itemprice", "iteminfo", 'i']:
+                        elif ccmd in ["item", "price", "itemprice", "iteminfo"]:
                             args.pop(0)
                             await item(message, user, guildconfig, *args)
-                        elif args[0].lower() in ["server", "status", "serverstatus", 's']:
+                        elif ccmd in ["server", "status", "serverstatus"]:
                             args.pop(0)
                             await status(message, user, guildconfig, *args)
-                        elif args[0].lower() in ["admin"] and type(message.channel) == discord.channel.DMChannel and user['is_superadmin']:
+                        elif ccmd in ["admin"] and type(message.channel) == discord.channel.DMChannel and user['is_superadmin']:
                             args.pop(0)
                             await admin(message, user, guildconfig, *args)
-                        elif args[0].lower() in ["setup"] and type(message.channel) == discord.channel.DMChannel and user['is_admin']:
+                        elif ccmd in ["setup"] and type(message.channel) == discord.channel.DMChannel and user['is_admin']:
                             args.pop(0)
                             await setup(message, user, guildconfig, *args)
-                        elif args[0].lower() in ["test"] and user['is_admin']:
+                        elif ccmd in ["test"] and user['is_admin']:
                             args.pop(0)
                             await test(message, user, guildconfig, *args)
                         else:
@@ -558,7 +585,7 @@ async def playerinfo(message, user, guildconfig, *args):
                     embed = discord.Embed(description=msg, color=FAIL_COLOR)
                     await messagesend(message, embed, user, guildconfig)
         else:
-            msg = f"You must specify a game character to get info for"
+            msg = f"You must specify a character name to get info for"
             embed = discord.Embed(description=msg, color=FAIL_COLOR)
             await messagesend(message, embed, user, guildconfig)
     except:
@@ -1135,12 +1162,13 @@ async def setting(message, user, guildconfig, *args):
         for sec, val in guildconfig._sections.items():
             msg = ''
             for key, value in val.items():
-                if key != 'admin_role_id' and key != 'user_role_id' and key != 'setupran' and key != 'server_slug' and key != 'server_locale' and key != 'server_region_id' and key != 'server_id' and key != 'limit_to_channel_id':
+                if key != 'admin_role_id' and key != 'user_role_id' and key != 'setupran' and key != 'server_slug' and key != 'server_locale' and key != 'server_region_id' and key != 'server_id' and key != 'limit_to_channel_id' and key != 'setupadmin' and key != 'setupadmin_id':
                     if key == 'api_key' or key == 'client_id' or key == 'client_secret':
                         if value != 'None':
                             value = '<secret>'
                     msg = msg + f'{key.title()}: **{value}**\n'
             embed.add_field(name=sec.capitalize(), value=msg, inline=False)
+        embed.set_footer(text=f'Type {guildconfig.get("discord", "command_prefix")}setup to run the setup wizard and change any settings')
         await messagesend(message, embed, user, guildconfig)
     except:
         log.exception(f'Exception in settings function')

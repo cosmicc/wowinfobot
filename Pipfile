@@ -15,6 +15,7 @@ requests = "*"
 pytz = "*"
 aredis = "*"
 simplejson = "*"
+fuzzywuzzy = {extras = ["speedup"],version = "*"}
 
 [requires]
 python_version = "3.8"

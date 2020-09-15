@@ -3,6 +3,8 @@ FAIL_COLOR = 0xFF0000
 INFO_COLOR = 0x0088FF
 HELP_COLOR = 0xFF8800
 
+VALID_COMMANDS = ('player', 'lastraids', 'lastraid', 'wownews', 'warcraftnews', 'commands', 'helpme', 'playergear', 'playeritems', 'price', 'itemprice', 'item', 'raids', 'news', 'settings', 'admin', 'gear', 'setup', 'playerinfo', 'iteminfo', 'status', 'server', 'serverstatus')
+
 COMMAND_PREFIXES = {1: ["?", "Question Mark"], 2: [".", "Period"], 3: ["!", "Exclimation Point"], 4: ["#", "Pound"], 5: ["\\", "Backslash"], 6: ["%", "Percent"], 7: ["-", "Minus"], 8: ["$", "Dollar Sign"], 9: ["&", "Ampersand"], 10: ["*", "Asterisk"], 11: ["^", "Carat"], 12: [">", "Greater Than"]}
 
 GEAR_ORDER = {0: 'Head', 1: 'Neck', 2: 'Shoulders', 3: 'Shirt', 4: 'Chest', 5: 'Belt', 6: 'Legs', 7: 'Boots', 8: 'Bracers', 9: 'Hands', 10: 'Ring', 11: 'Ring', 12: 'Trinket', 13: 'Trinket', 14: 'Back', 15: 'Main Hand', 16: 'Off-Hand', 17: 'Ranged', 18: 'Tabard'}
