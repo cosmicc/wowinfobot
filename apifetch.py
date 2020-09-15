@@ -19,10 +19,11 @@ class BlizzardAPI:
         self.namespace = f'dynamic-classic-{self.region}'
         auth = aiohttp.BasicAuth(login=self.client_id, password=self.client_secret, encoding='utf-8')
         self.session = aiohttp.ClientSession(auth=auth)
-        log.debug('BlizzrdAPI web session started')
+        log.trace(f'BlizzrdAPI web session started')
 
     def close(self):
         if self.session is not None:
+            log.trace(f'BlizzrdAPI web session ended')
             return self.session.close()
 
     async def authorize(self):
@@ -44,17 +45,17 @@ class BlizzardAPI:
         params = {"access_token": self.access_token, "namespace": self.namespace, "region": self.region}
         params.update(kwargs)
         url = parse.urljoin(self.url, path)
-        log.debug(f'BlizzardAPI Retreiving URL: {url}')
+        log.trace(f'BlizzardAPI Retreiving URL: {url}')
         try:
             async with self.session.get(url, params=params, timeout=5) as response:
-                log.debug(f'BlizzardAPI HTTP Response: {response.status}')
+                log.trace(f'BlizzardAPI HTTP Response: {response.status}')
                 if response.status == 200:
                     return await response.json()
                 elif response.status == 401:
                     log.warning(f'BlizzardAPI Failed Request [{responses[response.status]}] api:{self.api_key} {url}')
                     return json.loads(json.dumps([{'error': response.status}]))
                 elif response.status - 400 >= 0 and response.status - 400 < 100:
-                    log.warning(f'BlizzardAPI client error [{response.status}] [{responses[response.status]}] {url}')
+                    log.debug(f'BlizzardAPI client error [{response.status}] [{responses[response.status]}] {url}')
                     return json.loads(json.dumps([{'error': response.status}]))
                 elif response.status - 500 >= 0 and response.status - 500 < 100:
                     log.warning(f'BlizzardAPI server error [{response.status}] [{responses[response.status]}] {url}')
@@ -85,27 +86,28 @@ class WarcraftLogsAPI:
         self.url = url
         self.api_key = api_key
         self.session = aiohttp.ClientSession()
-        log.debug('WarcraftlLogsAPI web session started')
+        log.trace(f'WarcraftlLogsAPI web session started')
 
     def close(self):
         if self.session is not None:
+            log.trace(f'WarcraftlLogsAPI web session ended')
             return self.session.close()
 
     async def _get(self, path, **kwargs):
         params = {"api_key": self.api_key}
         params.update(kwargs)
         url = parse.urljoin(self.url, path)
-        log.debug(f'WarcraftLogsAPI Retreiving URL: {url}')
+        log.trace(f'WarcraftLogsAPI Retreiving URL: {url}')
         try:
             async with self.session.get(url, params=params, timeout=5) as response:
-                log.debug(f'WarcraftLogsAPI HTTP Response: {response.status}')
+                log.trace(f'WarcraftLogsAPI HTTP Response: {response.status}')
                 if response.status == 200:
                     return await response.json()
                 elif response.status == 401:
                     log.warning(f'WarcraftLogsAPI Failed Request [{responses[response.status]}] api:{self.api_key} {url}')
                     return json.loads(json.dumps([{'error': response.status}]))
                 elif response.status - 400 >= 0 and response.status - 400 < 100:
-                    log.warning(f'WarcraftLogsAPI client error [{response.status}] [{responses[response.status]}] {url}')
+                    log.debug(f'WarcraftLogsAPI client error [{response.status}] [{responses[response.status]}] {url}')
                     return json.loads(json.dumps([{'error': response.status}]))
                 elif response.status - 500 >= 0 and response.status - 500 < 100:
                     log.warning(f'WarcraftLogsAPI server error [{response.status}] [{responses[response.status]}] {url}')
@@ -143,26 +145,31 @@ class NexusAPI:
     def __init__(self, url):
         self.url = url
         self.session = aiohttp.ClientSession()
-        log.debug('NexusAPI web session started')
+        log.trace(f'NexusAPI web session started')
 
     def close(self):
         if self.session is not None:
+            log.trace(f'NexusAPI web session ended')
             return self.session.close()
 
     async def _get(self, path, **kwargs):
         params = kwargs
         url = parse.urljoin(self.url, path)
-        log.debug(f'NexusAPI Retreiving URL: {url}')
+        log.trace(f'NexusAPI Retreiving URL: {url}')
         try:
             async with self.session.get(url, params=params, timeout=5) as response:
-                log.debug(f'NexusAPI HTTP Response: {response.status}')
+                log.trace(f'NexusAPI HTTP Response: {response.status}')
                 if response.status == 200:
-                    return await response.json()
+                    respo = await response.json()
+                    if len(respo) == 0:
+                        return json.loads(json.dumps([{'error': 400}]))
+                    else:
+                        return respo
                 elif response.status == 401:
                     log.warning(f'NexusAPI Failed Request [{responses[response.status]}] api:{self.api_key} {url}')
                     return json.loads(json.dumps([{'error': response.status}]))
                 elif response.status - 400 >= 0 and response.status - 400 < 100:
-                    log.warning(f'NexusAPI client error [{response.status}] [{responses[response.status]}] {url}')
+                    log.debug(f'NexusAPI client error [{response.status}] [{responses[response.status]}] {url}')
                     return json.loads(json.dumps([{'error': response.status}]))
                 elif response.status - 500 >= 0 and response.status - 500 < 100:
                     log.warning(f'NexusAPI server error [{response.status}] [{responses[response.status]}] {url}')

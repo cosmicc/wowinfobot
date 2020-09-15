@@ -5,6 +5,14 @@ import aredis
 import simplejson
 from loguru import logger as log
 
+DISCORD_OPTIONS = {'command_prefix': 'None', 'setupran': 'False', 'setupadmin': 'None', 'setupadmin_id': 0, 'admin_role_id': 0, 'admin_role': 'None', 'user_role_id': 0, 'user_role': 'None', 'pm_only': 'True', 'limit_to_channel': 'None', 'limit_to_channel_id': 0}
+
+SERVER_OPTIONS = {'server_name': 'None', 'server_region': 'None', 'server_timezone': 'None', 'server_id': 0, 'server_slug': 'None', 'guild_name': 'None', 'faction': 'None', 'server_type': 'None', 'server_locale': 'None', 'server_region_name': 'None'}
+
+WARCRAFTLOGS_OPTIONS = {"api_key": "None"}
+
+BLIZZARD_OPTIONS = {'client_id': 'None', 'client_secret': 'None'}
+
 
 class RedisPool:
 
@@ -48,45 +56,55 @@ class GuildConfigParser(RawConfigParser):
             await self.redis.connect()
         read_config = await self.redis.redis.get(self.guild_id)
         if read_config is None:
-            log.error(f'Trying to read config entry from a missing guild id in database [{self.guild_id}], loading defaults')
-            await self.default()
+            log.warning(f'Trying to read config entry from a missing guild id in database [{self.guild_id}], loading defaults')
+            await self._check_defaults()
         else:
             self.read_dict(eval(read_config.decode()))
+            await self._check_defaults()
 
     async def write(self):
         if len(self.redis.pool._available_connections) == 0 or not self.redis.connected:
             await self.redis.connect()
         await self.redis.redis.set(self.guild_id, simplejson.dumps(self._sections))
 
-    async def default(self):
-        self.add_section("discord")
-        self.set("discord", "command_prefix", "?")
-        self.set("discord", "admin_role_id", "None")
-        self.set("discord", "admin_role", "None")
-        self.set("discord", "user_role_id", "None")
-        self.set("discord", "user_role", "None")
-        self.set("discord", "pm_only", "True")
-        self.set("discord", "limit_to_channel", "All")
-        self.set("discord", "limit_to_channel_id", 0)
-        self.set("discord", "setupran", "False")
-        self.set("discord", "setupadmin", "None")
-        self.set("discord", "setupadmin_id", 0)
-        self.add_section("server")
-        self.set("server", "server_name", "My Server Name")
-        self.set("server", "server_region", "US")
-        self.set("server", "server_timezone", "America/Los_Angeles")
-        self.set("server", "server_id", 0)
-        self.set("server", "server_slug", "None")
-        self.set("server", "guild_name", "My Guild Name")
-        self.set("server", "faction", "Alliance")
-        self.set("server", "server_type", "None")
-        self.set("server", "server_locale", "enUS")
-        self.set("server", "server_region_name", "None")
-        self.add_section("warcraftlogs")
-        self.set("warcraftlogs", "api_key", "None")
-        self.add_section("blizzard")
-        self.set("blizzard", "client_id", "None")
-        self.set("blizzard", "client_secret", "None")
-        self.set("discord", "setupran", "False")
-        await self.write()
-        log.debug(f'Wrote default configuration for guild id [{self.guild_id}]')
+    async def _check_defaults(self):
+        changes = False
+        if not self.has_section("discord"):
+            changes = True
+            self.add_section("discord")
+        for key, val in DISCORD_OPTIONS.items():
+            if not self.has_option("discord", key):
+                changes = True
+                log.debug(f'Adding guildconfig missing option for [{self.guild_id}]: "discord", {key}, {val}')
+                self.set("discord", key, val)
+
+        if not self.has_section("server"):
+            changes = True
+            self.add_section("server")
+        for key, val in SERVER_OPTIONS.items():
+            if not self.has_option("server", key):
+                changes = True
+                log.debug(f'Adding guildconfig missing option for [{self.guild_id}]: "server", {key}, {val}')
+                self.set("server", key, val)
+
+        if not self.has_section("warcraftlogs"):
+            changes = True
+            self.add_section("warcraftlogs")
+        for key, val in WARCRAFTLOGS_OPTIONS.items():
+            if not self.has_option("warcraftlogs", key):
+                changes = True
+                log.debug(f'Adding guildconfig missing option for [{self.guild_id}]: "warcraftlogs", {key}, {val}')
+                self.set("warcraftlogs", key, val)
+
+        if not self.has_section("blizzard"):
+            changes = True
+            self.add_section("blizzard")
+        for key, val in BLIZZARD_OPTIONS.items():
+            if not self.has_option("blizzard", key):
+                changes = True
+                log.debug(f'Adding guildconfig missing option for [{self.guild_id}]: "blizzard", {key}, {val}')
+                self.set("blizzard", key, val)
+
+        if changes:
+            await self.write()
+            log.info(f'Updated configuration for guild [{self.guild_id}]')
