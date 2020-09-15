@@ -6,22 +6,20 @@ from numbers import Number
 from os import _exit, path, stat
 from pathlib import Path
 from sys import argv, exit, stdout
-from fuzzywuzzy import fuzz
 
 import discord
 from discord.ext import commands
+from fuzzywuzzy import fuzz
 from loguru import logger as log
 from prettyprinter import pprint
-
-from apifetch import BlizzardAPI, NexusAPI, WarcraftLogsAPI
-from classes import Item, Player
-from constants import (BOSSREF, BZONE, COMMAND_PREFIXES, FAIL_COLOR,
-                       GEAR_ORDER, HELP_COLOR, INFO_COLOR, RZONE,
+import uvloop
+from classes import Item, Player, RedisPool
+from constants import (BOSSREF, BZONE, COMMAND_PREFIXES, FAIL_COLOR, GEAR_ORDER, HELP_COLOR, INFO_COLOR, RZONE,
                        SUCCESS_COLOR, VALID_COMMANDS)
-from guildconfigparser import GuildConfigParser, RedisPool
+from datafetch import BlizzardAPI, NexusAPI, WarcraftLogsAPI
+from guildconfigparser import GuildConfigParser
 from processlock import PLock
-from timefunctions import (convert_time, elapsedTime, fix_item_time,
-                           fix_news_time)
+from timefunctions import convert_time, elapsedTime, fix_item_time, fix_news_time
 
 fuzzy_command_error = 75
 
@@ -59,7 +57,7 @@ if not path.exists(configfile) or stat(configfile).st_size == 0:
 systemconfig = ConfigParser()
 systemconfig.read(configfile)
 
-configtemplate = {'general': ['logfile', 'redis_host', 'redis_port', 'redis_db'], 'discord': ['api_key', 'dev_key', 'superadmin_id'], 'warcraftlogs': ['api_url'], 'blizzard': ['api_url', 'client_id', 'secret'], 'tsm': ['api_url']}
+configtemplate = {'general': ['logfile', 'redis_host', 'redis_port', 'config_db'], 'discord': ['api_key', 'dev_key', 'superadmin_id'], 'warcraftlogs': ['api_url'], 'blizzard': ['api_url', 'client_id', 'secret'], 'tsm': ['api_url']}
 
 for section, options in configtemplate.items():
     if not systemconfig.has_section(section):
@@ -72,9 +70,14 @@ for section, options in configtemplate.items():
                 exit(1)
 
 logfile = Path(systemconfig.get("general", "logfile"))
+redis_socket = systemconfig.get("general", "redis_socket")
+cache_socket = systemconfig.get("general", "cache_socket")
 redis_host = systemconfig.get("general", "redis_host")
+cache_host = systemconfig.get("general", "cache_host")
 redis_port = systemconfig.get("general", "redis_port")
-redis_db = systemconfig.get("general", "redis_db")
+cache_port = systemconfig.get("general", "cache_port")
+config_db = systemconfig.get("general", "config_db")
+cache_db = systemconfig.get("general", "cache_db")
 discordkey = systemconfig.get("discord", "api_key")
 discordkey_dev = systemconfig.get("discord", "dev_key")
 superadmin_id = systemconfig.get("discord", "superadmin_id")
@@ -113,8 +116,12 @@ bot = commands.Bot(command_prefix="=", case_insensitive=True)
 bot.remove_command("help")
 log.debug('Discord class initalized')
 
-redis = RedisPool(redis_host, redis_port, redis_db)
+redis = RedisPool(redis_socket, redis_host, redis_port, config_db)
+cache = RedisPool(cache_socket, cache_host, cache_port, cache_db)
 bot.loop.create_task(redis.connect())
+
+bot.loop.create_task(cache.connect())
+
 tsmclient = NexusAPI(tsm_url)
 log.debug('NexusAPI class initalized')
 
@@ -262,7 +269,7 @@ async def bad_command(message, user, guildconfig, *args):
     if len(args) == 1:
         msg = f'`{message.content}` is not a valid command.\nMaybe you mean `{pref}player {strargs}` or `{pref}item {strargs}`\nOr try `{pref}help for a list of commands`'
     else:
-         msg = f'`{message.content}` is not a valid command.\nMaybe you mean `{pref}item {strargs}`\nOr try `{pref}help` for a list of commands'
+        msg = f'`{message.content}` is not a valid command.\nMaybe you mean `{pref}item {strargs}`\nOr try `{pref}help` for a list of commands'
     embed = discord.Embed(description=msg, color=FAIL_COLOR)
     await messagesend(message, embed, user, guildconfig)
 
@@ -424,7 +431,7 @@ async def on_message(message):
                         elif ccmd in ["admin"] and type(message.channel) == discord.channel.DMChannel and user['is_superadmin']:
                             args.pop(0)
                             await admin(message, user, guildconfig, *args)
-                        elif ccmd in ["setup"] and type(message.channel) == discord.channel.DMChannel and user['is_admin']:
+                        elif ccmd in ["setup", 'setupwizard', 'wizard'] and type(message.channel) == discord.channel.DMChannel and user['is_admin']:
                             args.pop(0)
                             await setup(message, user, guildconfig, *args)
                         elif ccmd in ["test"] and user['is_admin']:
@@ -1232,8 +1239,10 @@ async def test(message, user, guildconfig, *args):
 
 def main():
     if BRANCH != 'develop':
+        uvloop.install()
         bot.run(discordkey)
     else:
+        uvloop.install()
         bot.run(discordkey_dev)
 
 

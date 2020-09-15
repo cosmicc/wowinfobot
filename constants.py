@@ -3,7 +3,7 @@ FAIL_COLOR = 0xFF0000
 INFO_COLOR = 0x0088FF
 HELP_COLOR = 0xFF8800
 
-VALID_COMMANDS = ('player', 'lastraids', 'lastraid', 'wownews', 'warcraftnews', 'commands', 'helpme', 'playergear', 'playeritems', 'price', 'itemprice', 'item', 'raids', 'news', 'settings', 'admin', 'gear', 'setup', 'playerinfo', 'iteminfo', 'status', 'server', 'serverstatus')
+VALID_COMMANDS = ('help', 'player', 'lastraids', 'lastraid', 'wownews', 'warcraftnews', 'commands', 'helpme', 'playergear', 'playeritems', 'price', 'itemprice', 'item', 'raids', 'news', 'settings', 'admin', 'gear', 'setup', 'playerinfo', 'iteminfo', 'status', 'server', 'serverstatus', 'wizard', 'setupwizard')
 
 COMMAND_PREFIXES = {1: ["?", "Question Mark"], 2: [".", "Period"], 3: ["!", "Exclimation Point"], 4: ["#", "Pound"], 5: ["\\", "Backslash"], 6: ["%", "Percent"], 7: ["-", "Minus"], 8: ["$", "Dollar Sign"], 9: ["&", "Ampersand"], 10: ["*", "Asterisk"], 11: ["^", "Carat"], 12: [">", "Greater Than"]}
 

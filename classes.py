@@ -1,7 +1,54 @@
-from prettyprinter import pprint
+from asyncio import sleep
+
+import aredis
+from aredis.connection import UnixDomainSocketConnection
+
+from loguru import logger as log
 
 from constants import BOSSREF, ROLES, RZONE, SPECROLES
 from timefunctions import convert_time
+
+
+class RedisPool:
+
+    def __init__(self, socket, host, port, db, max_idle_time=30, idle_check_interval=0.1, max_connections=50):
+        self.socket = socket
+        self.host = host
+        self.port = port
+        self.db = db
+        self.max_idle_time = max_idle_time
+        self.idle_check_interval = idle_check_interval
+        self.max_connections = max_connections
+        self.pool = None
+        if self.socket != "" and (self.socket).lower() != "none":
+            self.connection = 'socket'
+
+            self.pool = aredis.ConnectionPool(connection_class=UnixDomainSocketConnection, path=self.socket, db=self.db)
+        else:
+            self.connection = 'tcp'
+            self.pool = aredis.ConnectionPool(host=self.host, port=self.port, db=self.db, max_connections=self.max_connections)
+        self.redis = aredis.StrictRedis(connection_pool=self.pool)
+        self.connected = False
+
+    async def connect(self):
+            while len(self.pool._available_connections) == 0 or not self.connected:
+                try:
+                    await self.redis.ping()
+                except:
+                    self.connected = False
+                    log.exception("Failed connection to Redis server, retrying...")
+                    await sleep(10)
+                else:
+                    self.connected = True
+                    if self.connection == 'socket':
+                        log.debug(f"{self.connection.capitalize()} connection verified to Redis socket [{self.socket}]")
+                    else:
+                        log.debug(f"{self.connection.capitalize()} connection verified to Redis server [{self.host}:{self.port} DB:{self.db}]")
+
+    async def disconnect(self):
+        self.verified = False
+        if self.pool is not None:
+            self.pool.disconnect()
 
 
 class Item:

@@ -16,6 +16,9 @@ pytz = "*"
 aredis = "*"
 simplejson = "*"
 fuzzywuzzy = {extras = ["speedup"],version = "*"}
+msgpack = "*"
+hiredis = "*"
+uvloop = "*"
 
 [requires]
 python_version = "3.8"

@@ -1,27 +1,22 @@
 [general]
-loglevel = INFO
-logfile = /home/user/wowinfobot.log
-
-[server]
-server_name = Bigglesworth
-server_region = US
-server_timezone = America/Los_Angeles
-guild_name = <Change Me>
-faction = <Change Me>
+logfile = /var/logs/wowinfobot.log
+redis_host = 127.0.0.1 
+redis_port = 6379 
+config_db = 1
+cache_db = 2
 
 [discord]
-command_prefix = ?
-api_key = <Change Me>
+superadmin_id = 0000000000000000
+api_key = abcdefghijklmnopqrstuvwxyz
+dev_key = abcdefghijklmnopqrstuvwxyz
 
-[warcraftlogs_api]
+[warcraftlogs]
 api_url = https://classic.warcraftlogs.com/v1/
-api_key = <Change Me>
 
-[blizzard_api]
+[blizzard]
 api_url = https://us.api.blizzard.com/
-client_id = <Change Me>
-client_secret = <Change Me>
+client_id = abcdefghijklmnopqrstuvwxyz
+secret = abcdefghijklmnopqrstuvwxyz
 
-[tsm_api]
+[tsm]
 api_url = https://api.nexushub.co/wow-classic/v1/
-fuzzy_search_threshold = 0.8
