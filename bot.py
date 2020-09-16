@@ -477,65 +477,72 @@ async def status(message, user, guildconfig, *args):
         await messagesend(message, error_embed(message), user, guildconfig)
 
 
+def abrzone(zcheck):
+    if zcheck.lower() == "mc":
+        nzone = 1000
+        return RZONE[nzone]
+    elif zcheck.lower() == "zg":
+        nzone = 1003
+        return RZONE[nzone]
+    elif zcheck.lower() == "ony" or zcheck.lower() == "onyxia":
+        nzone = 1001
+        return RZONE[nzone]
+    elif zcheck.lower() == "bwl":
+        nzone = 1002
+        return RZONE[nzone]
+    elif zcheck.lower() == "aq20":
+        nzone = 1004
+        return RZONE[nzone]
+    elif zcheck.lower() == "aq40":
+        nzone = 1005
+        return RZONE[nzone]
+    else:
+        return None
+
+
 async def lastraids(message, user, guildconfig, *args):
     logcommand(message, user)
     try:
         wclclient = WarcraftLogsAPI(wcl_url, guildconfig.get('warcraftlogs', 'api_key'))
         tz = guildconfig.get('server', 'server_timezone')
-        enclist = await wclclient.guild(guildconfig.get('server', 'guild_name'), guildconfig.get('server', 'server_name'), guildconfig.get('server', 'server_region'))
+        if len(args) == 0:
+            raidzone = None
+            gnme = guildconfig.get('server', 'guild_name').title()
+        elif len(args) == 1:
+            raidzone = abrzone(args[0])
+            if raidzone is None:
+                gnme = args[0].title()
+            else:
+                gnme = guildconfig.get('server', 'guild_name').title()
+        elif len(args) > 1:
+            raidzone = abrzone(args[0])
+            if raidzone is None:
+                gnme = ' '.join(args).title()
+            else:
+                args = list(args)
+                args.pop(0)
+                gnme = ' '.join(args).title()
+        enclist = await wclclient.guild(gnme, guildconfig.get('server', 'server_name'), guildconfig.get('server', 'server_region'))
         if await checkhttperrors(message, user, guildconfig, enclist, placeholder='guild', resource='warcraft logs'):
             a = 1
             nzone = 0
             tt = 0
-            cont = True
-            if args:
-                if args[0].lower() == "mc":
-                    nzone = 1000
-                    tt = RZONE[nzone]
-                elif args[0].lower() == "zg":
-                    nzone = 1003
-                    tt = RZONE[nzone]
-                elif args[0].lower() == "ony" or args[0].lower() == "onyxia":
-                    nzone = 1001
-                    tt = RZONE[nzone]
-                elif args[0].lower() == "bwl":
-                    nzone = 1002
-                    tt = RZONE[nzone]
-                elif args[0].lower() == "aq20":
-                    nzone = 1004
-                    tt = RZONE[nzone]
-                elif args[0].lower() == "aq40":
-                    nzone = 1005
-                    tt = RZONE[nzone]
-                elif args[0].lower() == "aq":
-                    if args[1] == "20":
-                        nzone = 1004
-                        tt = RZONE[nzone]
-                    if args[1] == "40":
-                        nzone = 1005
-                        tt = RZONE[nzone]
-                else:
-                    embed = discord.Embed(description=f"Invalid instance {args[0]}", color=FAIL_COLOR)
-                    await wclclient.close()
-                    await messagesend(message, embed, user, guildconfig)
-                    cont = False
-            if cont:
-                if tt == 0:
-                    tttitle = f"Last 5 Logged Raids for {user['guild_name']}"
-                else:
-                    tttitle = f"Last 5 Logged {tt} Raids for {user['guild_name']}"
-                embed = discord.Embed(title=tttitle, color=INFO_COLOR)
-                for each in enclist:
-                    if (each['zone'] == nzone or nzone == 0) and (a <= 5):
-                        kills, wipes, size, lastboss = await fight_data(wclclient, each['id'])
-                        rtstart = convert_time(each['start'], timeonly=True, tz=tz)
-                        rtstop = convert_time(each['end'], timeonly=True, tz=tz)
-                        embed.add_field(name=f"{RZONE[each['zone']]} - {convert_time(each['start'], dateonly=True, tz=tz)} ({each['title']})", value=f"{rtstart}-{rtstop} - {elapsedTime(each['start'], each['end'])}\n[Bosses Killed: ({kills}\{BZONE[each['zone']]}) with {wipes} Wipes - Last Boss: {lastboss}](https://classic.warcraftlogs.com/reports/{each['id']})", inline=False)
-                        a = a + 1
-                if a == 1:
-                    embed = discord.Embed(description=f"No raids were found for {guildconfig.get('server', 'guild_name').title()} on {[guildconfig.get('server', 'server_name').title()]}", color=FAIL_COLOR)
-                await wclclient.close()
-                await messagesend(message, embed, user, guildconfig)
+            if tt == 0:
+                tttitle = f"Last 5 Logged Raids for {gnme}"
+            else:
+                tttitle = f"Last 5 Logged {raidzone} Raids for {gnme}"
+            embed = discord.Embed(title=tttitle, color=INFO_COLOR)
+            for each in enclist:
+                if (each['zone'] == nzone or nzone == 0 or nzone != -1) and (a <= 5):
+                    kills, wipes, size, lastboss = await fight_data(wclclient, each['id'])
+                    rtstart = convert_time(each['start'], timeonly=True, tz=tz)
+                    rtstop = convert_time(each['end'], timeonly=True, tz=tz)
+                    embed.add_field(name=f"{RZONE[each['zone']]} - {convert_time(each['start'], dateonly=True, tz=tz)} ({each['title']})", value=f"{rtstart}-{rtstop} - {elapsedTime(each['start'], each['end'])}\n[Bosses Killed: ({kills}\{BZONE[each['zone']]}) with {wipes} Wipes - Last Boss: {lastboss}](https://classic.warcraftlogs.com/reports/{each['id']})", inline=False)
+                    a = a + 1
+            if a == 1:
+                embed = discord.Embed(description=f"No logged raids were found for {guildconfig.get('server', 'guild_name').title()} on {[guildconfig.get('server', 'server_name').title()]}", color=FAIL_COLOR)
+            await wclclient.close()
+            await messagesend(message, embed, user, guildconfig)
         else:
             await wclclient.close()
     except:
